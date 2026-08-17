@@ -28,7 +28,7 @@ class FeatureStats:
     仅用训练交易日拟合，验证 / 测试集复用同一统计量，避免未来信息泄漏。
     """
 
-    def __init__(self, micro_mean, micro_std, macro_mean, macro_std, clip: float = 10.0):
+    def __init__(self, micro_mean, micro_std, macro_mean, macro_std, clip: float):
         self.micro_mean, self.micro_std = micro_mean, micro_std
         self.macro_mean, self.macro_std = macro_mean, macro_std
         self.clip = clip
@@ -77,7 +77,7 @@ def build_micro_matrix(frame: pd.DataFrame) -> np.ndarray:
             _safe_ratio(bid_p, bid1p) - 1.0,
             _safe_ratio(ask_p, bid1p) - 1.0,
             np.log1p(_safe_ratio(bid_q, np.maximum(bid_q[:, :1], 1.0))),
-            np.log1p(_safe_ratio(ask_q, np.maximum(bid_q[:, :1], 1.0))),
+            np.log1p(_safe_ratio(ask_q, np.maximum(ask_q[:, :1], 1.0))),
         ],
         axis=1,
     )
@@ -118,24 +118,21 @@ def build_macro_features(mid_window: np.ndarray, vol_window: np.ndarray, n_bars:
     mid_window / vol_window 长度为 lookback_ticks，按 bar 聚合后计算
     论文 Table 2 的 11 个指标，并附加相对量能 z_volume。
     """
-    closes = mid_window.reshape(n_bars, -1)[:, -1]
-    opens = mid_window.reshape(n_bars, -1)[:, 0]
-    highs = mid_window.reshape(n_bars, -1).max(axis=1)
-    lows = mid_window.reshape(n_bars, -1).min(axis=1)
+    bars = mid_window.reshape(n_bars, -1)
+    closes = bars[:, -1]
     bar_vol = vol_window.reshape(n_bars, -1).sum(axis=1)
 
-    c = closes[-1]
-    eps = 1e-12
+    c = closes[-1]                               # 中间价恒为正，无需除零保护
+    z_close = c / closes[-2] - 1.0
     feats = [
-        opens[-1] / c - 1.0,                     # z_open
-        highs[-1] / c - 1.0,                     # z_high
-        lows[-1] / c - 1.0,                      # z_low
-        c / (closes[-2] + eps) - 1.0,            # z_close
-        c / (closes[-2] + eps) - 1.0,            # z_adj_close（无复权数据，同 z_close）
+        bars[-1, 0] / c - 1.0,                   # z_open
+        bars[-1].max() / c - 1.0,                # z_high
+        bars[-1].min() / c - 1.0,                # z_low
+        z_close,                                 # z_close
+        z_close,                                 # z_adj_close（无复权数据，同 z_close）
     ]
-    for k in (5, 10, 15, 20, 25, 30):            # z_d_k
-        feats.append(closes[-k:].mean() / (c + eps) - 1.0)
-    feats.append(bar_vol[-1] / (bar_vol.mean() + eps) - 1.0)  # z_volume
+    feats += [closes[-k:].mean() / c - 1.0 for k in (5, 10, 15, 20, 25, 30)]  # z_d_k
+    feats.append(_safe_ratio(bar_vol[-1], bar_vol.mean()) - 1.0)              # z_volume
     return np.asarray(feats, dtype=np.float32)
 
 

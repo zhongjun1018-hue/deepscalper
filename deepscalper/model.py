@@ -17,6 +17,13 @@ from .config import Config
 from .features import MACRO_DIM, MICRO_DIM, PRIVATE_DIM
 
 
+def resolve_device(cfg: Config) -> torch.device:
+    """解析 cfg.device："auto" 时有 CUDA 用 CUDA，否则用 CPU。"""
+    if cfg.device == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return torch.device(cfg.device)
+
+
 class MarketEncoder(nn.Module):
     """微观 + 宏观双路编码，输出市场嵌入 e_t。"""
 
@@ -68,13 +75,12 @@ class BDQNetwork(nn.Module):
         return q_p, q_q, self.vol_head(e).squeeze(-1)
 
 
-def to_batch(obs_list, device: torch.device) -> tuple[torch.Tensor, ...]:
-    """将 Observation 列表堆叠为网络输入张量。"""
-    micro_lob = torch.as_tensor(np.stack([o.micro_lob for o in obs_list]))
-    private = torch.as_tensor(np.stack([o.private for o in obs_list]))
-    macro = torch.as_tensor(np.stack([o.macro for o in obs_list]))
+def to_batch(
+    obs_list, device: torch.device
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """将 Observation 列表堆叠为网络输入张量 (micro_lob, private, macro)。"""
     return (
-        micro_lob.to(device),
-        private.to(device),
-        macro.to(device),
+        torch.as_tensor(np.stack([o.micro_lob for o in obs_list])).to(device),
+        torch.as_tensor(np.stack([o.private for o in obs_list])).to(device),
+        torch.as_tensor(np.stack([o.macro for o in obs_list])).to(device),
     )

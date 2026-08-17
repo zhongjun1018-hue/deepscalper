@@ -1,7 +1,7 @@
 """优先经验回放（proportional PER）。
 
-转移样本以轻量引用存储（交易日 id + 决策时刻 + 动作 + 私有状态），
-观测在采样时由 DayMarket 重建，避免在缓冲区中冗余保存大矩阵。
+转移样本以轻量引用存储（交易日 id + 决策时刻 + 动作 + 私有状态历史），
+观测在采样时由 DayMarket 重建，避免在缓冲区中冗余保存微观 / 宏观特征矩阵。
 """
 
 from __future__ import annotations
@@ -17,13 +17,11 @@ class Transition:
     t: int                 # 决策点在 decision_points 中的索引
     action_p: int
     action_q: int
-    reward: float          # 训练奖励（含 hindsight bonus，若启用）
-    next_t: int            # -1 表示终止
+    reward: float             # 训练奖励（含 hindsight bonus，若启用）
+    next_t: int               # -1 表示终止
     done: bool
-    pos: float             # 决策时（动作前）私有状态
-    cash: float
-    next_pos: float        # 下一决策时私有状态
-    next_cash: float
+    priv_hist: np.ndarray     # 决策时（动作前）的 (持仓, 现金) 历史
+    next_priv_hist: np.ndarray
     vol_label: float
 
 
@@ -38,10 +36,9 @@ class PrioritizedReplay:
     def __len__(self) -> int:
         return len(self.data)
 
-    def push(self, tr: Transition, td_error: float | None = None) -> None:
-        prio = abs(td_error) + 1e-6 if td_error is not None else (
-            self.priorities[: len(self.data)].max() if self.data else 1.0
-        )
+    def push(self, tr: Transition) -> None:
+        """新样本以当前最大优先级入队，保证至少被采样一次。"""
+        prio = self.priorities[: len(self.data)].max() if self.data else 1.0
         if len(self.data) < self.capacity:
             self.data.append(tr)
         else:

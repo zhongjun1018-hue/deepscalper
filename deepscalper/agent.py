@@ -5,8 +5,6 @@
 
 from __future__ import annotations
 
-import copy
-
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -14,18 +12,19 @@ import torch.nn.functional as F
 from .buffer import PrioritizedReplay, Transition
 from .config import Config
 from .env import DayMarket, Observation
-from .model import BDQNetwork, to_batch
+from .model import BDQNetwork, resolve_device, to_batch
 
 
 class BDQAgent:
     def __init__(self, cfg: Config, seed: int, aux_task: bool = True):
         self.cfg = cfg
         self.aux_task = aux_task
-        self.device = torch.device("cpu")
+        self.device = resolve_device(cfg)
         torch.manual_seed(seed)
         self.rng = np.random.default_rng(seed)
-        self.online = BDQNetwork(cfg)
-        self.target = copy.deepcopy(self.online).eval()
+        self.online = BDQNetwork(cfg).to(self.device)
+        self.target = BDQNetwork(cfg).to(self.device).eval()
+        self.target.load_state_dict(self.online.state_dict())
         for p in self.target.parameters():
             p.requires_grad_(False)
         self.optimizer = torch.optim.Adam(self.online.parameters(), lr=cfg.lr)
@@ -52,9 +51,9 @@ class BDQAgent:
         self.buffer.push(tr)
 
     def _obs_of(self, markets: list[DayMarket], day_id: int, t_idx: int,
-                pos: float, cash: float) -> Observation:
+                priv_hist: np.ndarray) -> Observation:
         m = markets[day_id]
-        return m.observe(m.decision_points[t_idx], pos, cash, m.cash0)
+        return m.observe(m.decision_points[t_idx], priv_hist)
 
     def update(self, markets: list[DayMarket], beta: float) -> float | None:
         cfg = self.cfg
@@ -62,52 +61,53 @@ class BDQAgent:
             return None
         batch, idx, weights = self.buffer.sample(cfg.batch_size, beta, self.rng)
 
-        obs = [self._obs_of(markets, tr.day_id, tr.t, tr.pos, tr.cash) for tr in batch]
+        obs = [self._obs_of(markets, tr.day_id, tr.t, tr.priv_hist) for tr in batch]
         next_obs = [
-            self._obs_of(markets, tr.day_id, tr.next_t, tr.next_pos, tr.next_cash)
+            self._obs_of(markets, tr.day_id, tr.next_t, tr.next_priv_hist)
             if not tr.done else None
             for tr in batch
         ]
 
         self.online.train()
         q_p, q_q, vol_pred = self.online(*to_batch(obs, self.device))
-        a_p = torch.as_tensor([tr.action_p for tr in batch])
-        a_q = torch.as_tensor([tr.action_q for tr in batch])
+        a_p = torch.as_tensor([tr.action_p for tr in batch], device=self.device)
+        a_q = torch.as_tensor([tr.action_q for tr in batch], device=self.device)
         q_p_sel = q_p.gather(1, a_p[:, None]).squeeze(1)
         q_q_sel = q_q.gather(1, a_q[:, None]).squeeze(1)
 
         with torch.no_grad():
-            rewards = torch.as_tensor([tr.reward for tr in batch], dtype=torch.float32)
-            dones = torch.as_tensor([tr.done for tr in batch], dtype=torch.float32)
-            non_terminal = [o for o in next_obs if o is not None]
-            next_q_p = torch.zeros(len(batch))
-            next_q_q = torch.zeros(len(batch))
-            if non_terminal:
-                nq_p, nq_q, _ = self.target(*to_batch(non_terminal, self.device))
-                it = iter(zip(nq_p.max(-1).values, nq_q.max(-1).values))
-                for i, o in enumerate(next_obs):
-                    if o is not None:
-                        vp, vq = next(it)
-                        next_q_p[i], next_q_q[i] = vp, vq
-            y_p = rewards + cfg.gamma * (1 - dones) * next_q_p
-            y_q = rewards + cfg.gamma * (1 - dones) * next_q_q
+            rewards = torch.as_tensor(
+                [tr.reward for tr in batch], dtype=torch.float32, device=self.device
+            )
+            next_q_p = torch.zeros(len(batch), device=self.device)
+            next_q_q = torch.zeros(len(batch), device=self.device)
+            keep = [i for i, o in enumerate(next_obs) if o is not None]
+            if keep:
+                nq_p, nq_q, _ = self.target(*to_batch([next_obs[i] for i in keep], self.device))
+                index = torch.as_tensor(keep, device=self.device)
+                next_q_p[index] = nq_p.max(-1).values
+                next_q_q[index] = nq_q.max(-1).values
+            y_p = rewards + cfg.gamma * next_q_p
+            y_q = rewards + cfg.gamma * next_q_q
 
-        w = torch.as_tensor(weights)
+        w = torch.as_tensor(weights, device=self.device)
         td_p = y_p - q_p_sel
         td_q = y_q - q_q_sel
         loss_q = ((w * (td_p**2 + td_q**2)) / 2).mean()
 
         loss = loss_q
         if self.aux_task:
-            vol_target = torch.as_tensor([tr.vol_label for tr in batch], dtype=torch.float32)
+            vol_target = torch.as_tensor(
+                [tr.vol_label for tr in batch], dtype=torch.float32, device=self.device
+            )
             loss = loss + cfg.vol_loss_weight * F.mse_loss(vol_pred, vol_target)
 
         self.optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.online.parameters(), 10.0)
+        torch.nn.utils.clip_grad_norm_(self.online.parameters(), cfg.grad_clip)
         self.optimizer.step()
 
-        td = ((td_p.abs() + td_q.abs()) / 2).detach().numpy()
+        td = ((td_p.abs() + td_q.abs()) / 2).detach().cpu().numpy()
         self.buffer.update_priorities(idx, td)
 
         self.updates += 1

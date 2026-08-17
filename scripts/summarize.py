@@ -7,7 +7,6 @@ import json
 import os
 import sys
 
-import numpy as np
 import pandas as pd
 
 METHODS = ["BAH", "MV", "TSM", "MLP", "GRU", "LGBM", "DQN", "DS-NH", "DS-NA", "DS"]
@@ -19,29 +18,30 @@ def main(result_dir: str = "results") -> None:
     for path in sorted(glob.glob(os.path.join(result_dir, "*", "*.json"))):
         with open(path, encoding="utf-8") as f:
             r = json.load(f)
-        rows.append({"symbol": r["symbol"], "method": r["method"], "seed": r.get("seed"),
+        rows.append({"symbol": r["symbol"], "method": r["method"],
+                     "h": r["hindsight_ticks"], "seed": r["seed"],
                      **{k: r[k] for k in METRICS}})
     if not rows:
         print("未找到结果文件")
         return
     df = pd.DataFrame(rows)
 
+    # 按 hindsight 视野分组：同一方法的不同视野是不同配置，不可合并统计
     out_rows = []
-    for (symbol, method), g in df.groupby(["symbol", "method"]):
-        row = {"symbol": symbol, "method": method, "n_runs": len(g)}
+    for (symbol, method, h), g in df.groupby(["symbol", "method", "h"], dropna=False):
+        row = {"symbol": symbol, "method": method, "h": h, "n_runs": len(g)}
         for k in METRICS:
             v = g[k].to_numpy()
             row[k] = f"{v.mean():.4f} ± {v.std():.4f}" if len(g) > 1 else f"{v.mean():.4f}"
-            row[f"{k}_mean"] = v.mean()
         out_rows.append(row)
     summary = pd.DataFrame(out_rows)
     summary["method"] = pd.Categorical(summary["method"], METHODS, ordered=True)
-    summary = summary.sort_values(["symbol", "method"])
+    summary = summary.sort_values(["symbol", "method", "h"])
+    summary["h"] = summary["h"].map(lambda x: "" if pd.isna(x) else str(int(x)))
 
     out_path = os.path.join(result_dir, "summary.csv")
-    summary.drop(columns=[f"{k}_mean" for k in METRICS]).to_csv(out_path, index=False)
-    cols = ["symbol", "method", "n_runs"] + METRICS
-    print(summary[cols].to_string(index=False))
+    summary.to_csv(out_path, index=False)
+    print(summary.to_string(index=False))
     print(f"\n已保存：{os.path.abspath(out_path)}")
 
 

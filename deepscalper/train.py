@@ -27,7 +27,7 @@ def evaluate_greedy(agent: BDQAgent, markets: list[DayMarket], cfg: Config) -> d
     daily_returns, fills = [], []
     for m in markets:
         env = TradingEnv(m, cfg, hindsight=False)
-        obs = env.reset()
+        obs = env.observation()
         while True:
             action = agent.greedy(obs)
             res = env.step(action)
@@ -59,17 +59,16 @@ def train_agent(
     agent = BDQAgent(cfg, seed=seed, aux_task=aux_task)
 
     best_val_tr, best_state, history = -np.inf, None, []
-    total_steps = sum(len(m.decision_points) for m in markets)
     for epoch in range(1, cfg.epochs + 1):
         losses = []
         for day_id, m in enumerate(markets):
             env = TradingEnv(m, cfg, hindsight=hindsight)
-            obs = env.reset()
+            obs = env.observation()
             eps = cfg.epsilon_at(epoch, day_id / max(1, len(markets)))
             while True:
                 action = agent.act(obs, eps)
                 t_idx = env.step_idx
-                pos, cash = env.pos, env.cash
+                priv_hist = env.priv_hist.copy()
                 res = env.step(action)
                 agent.push(
                     Transition(
@@ -80,15 +79,14 @@ def train_agent(
                         reward=res.train_reward,
                         next_t=res.t if not res.done else -1,
                         done=res.done,
-                        pos=pos,
-                        cash=cash,
-                        next_pos=res.pos,
-                        next_cash=res.cash,
+                        priv_hist=priv_hist,
+                        next_priv_hist=res.priv_hist,
                         vol_label=res.vol_label,
                     )
                 )
                 if env.step_idx % cfg.update_every == 0:
-                    beta = min(1.0, cfg.per_beta_start + 0.6 * agent.updates / 50_000)
+                    beta = min(1.0, cfg.per_beta_start + (1.0 - cfg.per_beta_start)
+                               * agent.updates / cfg.per_beta_steps)
                     loss = agent.update(markets, beta)
                     if loss is not None:
                         losses.append(loss)
@@ -99,11 +97,11 @@ def train_agent(
         val = evaluate_greedy(agent, val_markets, cfg)
         history.append(
             {"epoch": epoch, "val_TR": val["TR"], "val_SR": val["SR"],
-             "mean_loss": float(np.mean(losses)) if losses else None}
+             "mean_loss": float(np.mean(losses))}
         )
         print(
             f"{log_prefix} epoch {epoch}/{cfg.epochs} "
-            f"steps={total_steps} loss={history[-1]['mean_loss']:.3e} "
+            f"loss={history[-1]['mean_loss']:.3e} "
             f"val_TR={val['TR']:.4f} val_SR={val['SR']:.3f}",
             flush=True,
         )

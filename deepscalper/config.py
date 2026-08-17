@@ -1,10 +1,12 @@
 """全局配置：论文超参数与 tick 数据适配参数。
 
-窗口结构适配 tick 数据：回看 600 tick，hindsight 视野 3600 tick（180 决策步，
-对齐论文最优 h=180 分钟），波动率标签窗口 300 tick，每 20 tick 一个决策步，
-窗口不跨交易日、可跨午休。
-交易设定遵循论文 Section 5.4 框架：最大持仓 50；费率按 A 股现实取 1.0e-4
-（双边，论文为期货费率 2.3e-5）；杠杆 1 倍（论文为 5 倍）。
+窗口结构适配 tick 数据：回看 600 tick，hindsight 视野 1200 tick（60 决策步；
+A 股连续竞价仅 4 小时，论文的 180 决策步会使绝大多数决策点截断至日尾，
+故按 {300, 600, 900, 1200} 档位调参），波动率标签窗口 300 tick，
+每 20 tick 一个决策步，窗口不跨交易日。
+交易设定遵循论文 Section 5.4 框架，并适配 A 股：数量以手计（1 手 = 100 股），
+最大持仓 50 手；费率取 1.0e-4（双边）；杠杆 1 倍（论文为 5 倍）。
+持仓、现金与成交额按同一单位计量并统一以 cash0 归一，故单位换算不影响任何收益指标。
 """
 
 from dataclasses import dataclass
@@ -19,7 +21,7 @@ class Config:
     # ---- tick 窗口结构 ----
     lookback_ticks: int = 600       # 回看窗口（tick 数）
     horizon_ticks: int = 300        # 波动率预测标签窗口（tick 数）
-    hindsight_ticks: int = 3600     # hindsight 视野：180 决策步 ≈ 3 小时（论文最优 h=180 分钟）
+    hindsight_ticks: int = 1200     # hindsight 视野：60 决策步 ≈ 1 小时
     step_ticks: int = 20            # 决策间隔（tick 数）
     micro_stride: int = 20          # 微观序列抽样间隔：600/20 = 30 步
     bar_ticks: int = 20             # 宏观 OHLCV bar 长度：600/20 = 30 根
@@ -27,15 +29,16 @@ class Config:
     # ---- 交易设定（论文 5.4 框架，费率按 A 股现实调整）----
     fee_rate: float = 1.0e-4        # 手续费率 δ（买卖双边）
     leverage: float = 1.0           # 杠杆倍数（论文为 5）
-    max_position: int = 50          # 最大持仓（股）
-    price_tick: float = 0.01        # A 股最小价位（元）
+    max_position: int = 50          # 最大持仓（手）
+    lot_size: int = 100             # 1 手 = 100 股，用于将盘口挂单量折算为手
 
     # ---- 动作空间（BDQ 两分支）----
-    # 价位偏移相对对手价（买参考卖一价、卖参考买一价）：买向 off>=0 / 卖向 off<=0 穿价成交，
-    # 反向偏移为被动限价（即时撮合下不成交）。相对中间价的固定档位在宽价差标的
-    # （如 301308 价差中位数达 11 个价位）上可能永远无法穿价，故取对手价基准。
-    price_offsets: tuple = (-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5)  # 价位偏移（×price_tick）
-    quantities: tuple = (-50, -25, -10, -5, 0, 5, 10, 25, 50)      # 目标数量（符号=方向，0=不交易）
+    # 价格分支为穿价档深 k：买单依次吃卖 1..k 档、卖单依次吃买 1..k 档，各档成交量受
+    # 该档挂单量限制，故 k 越深成交越确定、成交均价越差。以档位而非最小价位计量，是因为
+    # 档间距随标的差异悬殊（301308 卖二档中位数距卖一 3 个价位，688030 仅 1 个），
+    # 固定价位偏移在两标的上的含义不可比。
+    price_levels: tuple[int, ...] = (1, 2, 3, 4, 5)                      # 穿价档深
+    quantities: tuple[int, ...] = (-50, -25, -10, -5, 0, 5, 10, 25, 50)  # 委托数量（手，符号=方向，0=不下单）
 
     # ---- 奖励 / 辅助任务 ----
     hindsight_weight: float = 0.1   # w（论文网格搜索结果最优值）
@@ -51,12 +54,14 @@ class Config:
     norm_clip: float = 10.0         # 标准化后的截断阈值
     gamma: float = 0.99
     lr: float = 1e-4
+    grad_clip: float = 10.0         # 梯度全局范数裁剪（DQN 基线按其原始设定不裁剪）
     batch_size: int = 64
     update_every: int = 2           # 每多少个决策步更新一次网络
     target_sync: int = 500          # 目标网络同步间隔（更新次数）
     buffer_capacity: int = 100_000
     per_alpha: float = 0.6
     per_beta_start: float = 0.4
+    per_beta_steps: int = 50_000    # β 由 per_beta_start 线性升至 1.0 所需的更新次数
     epochs: int = 5
     eps_start: float = 1.0
     eps_end: float = 0.1
@@ -66,11 +71,12 @@ class Config:
     val_ratio: float = 0.1
 
     # ---- 运行控制 ----
+    device: str = "auto"            # torch 设备："auto"（有 CUDA 则用）/ "cpu" / "cuda"
     num_threads: int = 2            # 单训练进程 torch 线程数（配合多进程并行）
 
     @property
     def n_price(self) -> int:
-        return len(self.price_offsets)
+        return len(self.price_levels)
 
     @property
     def n_quantity(self) -> int:
