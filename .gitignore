@@ -1,0 +1,25 @@
+# 虚拟环境
+.venv/
+venv/
+
+# 数据（体积大，不入库）
+data/
+
+# Python 产物
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# 模型权重与实验产出
+*.ckpt
+*.pt
+*.pth
+results/
+
+# IDE / 系统文件
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
