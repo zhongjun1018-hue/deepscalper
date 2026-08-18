@@ -1,10 +1,9 @@
 """模型：多模态市场编码器 + Branching Dueling Q-Network + 波动率辅助头。
 
-对应论文图 3：
   (a) 微观编码器：LOB 序列与私有状态序列各经一层 LSTM，取末隐状态拼接；
   (b) 宏观编码器：OHLCV+技术指标向量经 MLP；
   (c) 风险辅助任务：市场嵌入经单层 MLP 预测未来波动率；
-  (d) 动作分支：共享状态价值 V 与价格 / 数量两支优势函数聚合为 Q 值。
+  (d) 动作分支：共享状态价值 V 与半宽 / 倾斜 / 数量三支优势函数聚合为 Q 值。
 """
 
 from __future__ import annotations
@@ -50,7 +49,7 @@ class MarketEncoder(nn.Module):
 
 
 class BDQNetwork(nn.Module):
-    """BDQ：共享状态价值 + 价格 / 数量双优势分支，附波动率预测头。"""
+    """BDQ：共享状态价值 + 半宽 / 倾斜 / 数量三支优势，附波动率预测头。"""
 
     def __init__(self, cfg: Config):
         super().__init__()
@@ -58,21 +57,20 @@ class BDQNetwork(nn.Module):
         d = self.encoder.embed_dim
         self.trunk = nn.Sequential(nn.Linear(d, cfg.trunk_hidden), nn.ReLU())
         self.value_head = nn.Linear(cfg.trunk_hidden, 1)
-        self.price_head = nn.Linear(cfg.trunk_hidden, cfg.n_price)
-        self.qty_head = nn.Linear(cfg.trunk_hidden, cfg.n_quantity)
+        self.branch_heads = nn.ModuleList(
+            nn.Linear(cfg.trunk_hidden, n) for n in (cfg.n_width, cfg.n_tilt, cfg.n_size)
+        )
         self.vol_head = nn.Linear(d, 1)
 
     def forward(
         self, micro_lob: torch.Tensor, private: torch.Tensor, macro: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[list[torch.Tensor], torch.Tensor]:
         e = self.encoder(micro_lob, private, macro)
         s = self.trunk(e)
         v = self.value_head(s)
-        adv_p = self.price_head(s)
-        adv_q = self.qty_head(s)
-        q_p = v + (adv_p - adv_p.mean(dim=-1, keepdim=True))
-        q_q = v + (adv_q - adv_q.mean(dim=-1, keepdim=True))
-        return q_p, q_q, self.vol_head(e).squeeze(-1)
+        advantages = [head(s) for head in self.branch_heads]
+        q = [v + (a - a.mean(dim=-1, keepdim=True)) for a in advantages]
+        return q, self.vol_head(e).squeeze(-1)
 
 
 def to_batch(

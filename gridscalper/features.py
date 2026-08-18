@@ -1,13 +1,14 @@
 """特征工程：微观盘口特征、宏观 OHLCV+技术指标、训练标签。
 
 微观特征（每快照 50 维）：
-  - 10 档盘口价量（40 维）：各档价格除以一档价格（论文 5.4），
-    数量取 log1p(各档量 / 一档量) 以稳定量纲；
-  - 微观结构增强（10 维）：利用 tick 数据的委托笔数、撤单、加权均价、
-    成交量增量等字段，刻画买卖力量对比与订单流。
+  - 10 档盘口价量（40 维）：各档价格除以一档价格，数量取 log1p(各档量 / 一档量)；
+  - 微观结构增强（10 维）：委托笔数、撤单、加权均价、成交量增量等订单流字段。
 
-宏观特征（每决策步 12 维）：将回看窗口聚合为 30 根 20-tick OHLCV bar，
-按论文 Table 2 计算 11 个相对价格指标，并补充相对量能指标。
+宏观特征（11 维）：将回看窗口聚合为 30 根 20-tick OHLCV bar，计算 10 个相对价格
+指标并补充相对量能指标。
+
+私有状态（8 维，design 5.2）：由 PRIV_RAW_DIM 列的原始记录在 DayMarket.observe
+中归一得到，原始列见 PRIV_* 常量。
 """
 
 from __future__ import annotations
@@ -18,12 +19,16 @@ import pandas as pd
 MICRO_LOB_DIM = 40
 MICRO_EXTRA_DIM = 10
 MICRO_DIM = MICRO_LOB_DIM + MICRO_EXTRA_DIM
-MACRO_DIM = 12
-PRIVATE_DIM = 3  # 归一化持仓、归一化现金、剩余时间比例
+MACRO_DIM = 11
+PRIVATE_DIM = 8
+
+# 私有状态的原始记录列（按 tick 保存，归一后喂入 LSTM）
+PRIV_POS, PRIV_CASH, PRIV_CENTER, PRIV_WIDTH, PRIV_TILT, PRIV_SIZE, PRIV_LAST_FILL = range(7)
+PRIV_RAW_DIM = 7
 
 
 class FeatureStats:
-    """基于训练集拟合的 z-score 标准化统计量（微观 50 维 + 宏观 12 维）。
+    """基于训练集拟合的 z-score 标准化统计量（微观 50 维 + 宏观 11 维）。
 
     仅用训练交易日拟合，验证 / 测试集复用同一统计量，避免未来信息泄漏。
     """
@@ -41,11 +46,15 @@ class FeatureStats:
 
 
 def fit_feature_stats(markets, cfg) -> FeatureStats:
-    """在训练 markets 上拟合特征统计量（微观抽样以控制内存）。"""
+    """在训练 markets 上拟合特征统计量。
+
+    决策点由事件触发、依策略而变，故宏观统计量在固定 tick 网格 sample_points 上拟合，
+    使标准化口径与策略无关；微观特征抽样以控制内存。
+    """
     micro_rows, macro_rows = [], []
     for m in markets:
         micro_rows.append(m.micro[::4])
-        macro_rows.extend(m.macro_at(t, normalized=False) for t in m.decision_points)
+        macro_rows.extend(m.macro_at(t, normalized=False) for t in m.sample_points)
     micro_all = np.concatenate(micro_rows).astype(np.float64)
     macro_all = np.asarray(macro_rows, dtype=np.float64)
     return FeatureStats(
@@ -90,8 +99,9 @@ def build_micro_matrix(frame: pd.DataFrame) -> np.ndarray:
     ws = frame["WithdrawSellAmount"].to_numpy(np.float64)
     tvt = frame["TotalVolumeTrade"].to_numpy(np.float64)
     ntr_raw = frame["NumTrades"].to_numpy(np.float64)
-    vol = np.diff(tvt, prepend=tvt[0])      # 首拍增量记 0（累计量含开盘竞价，无法回溯）
-    ntr = np.diff(ntr_raw, prepend=ntr_raw[0])
+    # 累计字段偶有缺失或回退；负增量不是成交流，统一记 0。
+    vol = np.maximum(np.diff(tvt, prepend=tvt[0]), 0.0)
+    ntr = np.maximum(np.diff(ntr_raw, prepend=ntr_raw[0]), 0.0)
     log_ret = np.diff(np.log(mid), prepend=np.log(mid[0]))
 
     extra = np.column_stack(
@@ -113,11 +123,7 @@ def build_micro_matrix(frame: pd.DataFrame) -> np.ndarray:
 
 
 def build_macro_features(mid_window: np.ndarray, vol_window: np.ndarray, n_bars: int) -> np.ndarray:
-    """由回看窗口的中间价 / 成交量序列构建宏观特征 (MACRO_DIM,)。
-
-    mid_window / vol_window 长度为 lookback_ticks，按 bar 聚合后计算
-    论文 Table 2 的 11 个指标，并附加相对量能 z_volume。
-    """
+    """由回看窗口的中间价 / 成交量序列构建宏观特征 (MACRO_DIM,)。"""
     bars = mid_window.reshape(n_bars, -1)
     closes = bars[:, -1]
     bar_vol = vol_window.reshape(n_bars, -1).sum(axis=1)
@@ -129,7 +135,6 @@ def build_macro_features(mid_window: np.ndarray, vol_window: np.ndarray, n_bars:
         bars[-1].max() / c - 1.0,                # z_high
         bars[-1].min() / c - 1.0,                # z_low
         z_close,                                 # z_close
-        z_close,                                 # z_adj_close（无复权数据，同 z_close）
     ]
     feats += [closes[-k:].mean() / c - 1.0 for k in (5, 10, 15, 20, 25, 30)]  # z_d_k
     feats.append(_safe_ratio(bar_vol[-1], bar_vol.mean()) - 1.0)              # z_volume
@@ -142,11 +147,7 @@ def future_price_index(t: int, horizon: int, n: int) -> int:
 
 
 def volatility_label(mid: np.ndarray, t: int, horizon: int, step: int) -> float:
-    """未来 horizon 窗口内逐决策步对数收益的标准差（日尾截断）。
-
-    论文 4.4 的 y_vol = σ(r)，r 为「每个时间步」的收益——时间步即决策步
-    （论文 1 分钟）；σ(r) 与逐决策步收益同量级，是 η=1 有效的依据（论文 6.4）。
-    """
+    """未来 horizon 窗口内逐 step tick 对数收益的标准差（日尾截断）。"""
     idx = np.arange(t, min(t + horizon, len(mid) - 1) + 1, step)
     rets = np.diff(np.log(mid[idx]))
     return float(rets.std()) if rets.size > 1 else 0.0

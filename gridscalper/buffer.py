@@ -1,6 +1,6 @@
 """优先经验回放（proportional PER）。
 
-转移样本以轻量引用存储（交易日 id + 决策时刻 + 动作 + 私有状态历史），
+转移样本以轻量引用存储（交易日 id + 决策 tick + 动作 + 私有状态历史），
 观测在采样时由 DayMarket 重建，避免在缓冲区中冗余保存微观 / 宏观特征矩阵。
 """
 
@@ -14,13 +14,13 @@ import numpy as np
 @dataclass
 class Transition:
     day_id: int
-    t: int                 # 决策点在 decision_points 中的索引
-    action_p: int
-    action_q: int
-    reward: float             # 训练奖励（含 hindsight bonus，若启用）
+    t: int                    # 决策点的 tick 索引
+    action: tuple[int, int, int]   # (半宽档, 倾斜档, 数量档)
+    reward: float             # 训练奖励（含塑形项）
+    tau: int                  # 决策区间时长（tick），用于 SMDP 折扣 gamma^tau
     next_t: int               # -1 表示终止
     done: bool
-    priv_hist: np.ndarray     # 决策时（动作前）的 (持仓, 现金) 历史
+    priv_hist: np.ndarray     # 决策时（动作前）的私有状态历史
     next_priv_hist: np.ndarray
     vol_label: float
 

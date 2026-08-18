@@ -1,8 +1,9 @@
-"""并行实验运行器：对指定标的执行全部方法（DeepScalper 及消融 / DQN / 预测式 / 传统）。
+"""并行实验运行器：对指定标的执行网格 RL 的全部变体与基线。
 
-每个 (标的, 方法, 种子, hindsight 视野) 为一个独立作业，结果写入
-results/<symbol>/<method>[_h<视野>][_seed<k>].json；已存在的作业自动跳过，
-因此脚本可安全重复执行（断点续跑）。
+每个 (标的, 方法, 种子, w, λ) 为一个独立作业，结果写入
+results/<symbol>/<method>[_w<权重>][_lam<λ>][_seed<k>].json；已存在的作业自动跳过，
+因此脚本可安全重复执行（断点续跑）。w 与 λ 给多个值即展开为超参梯子，
+由 summarize.py 按验证集 SR 选优（design 6.2 / 7.1）。
 
 作业进程以 spawn 方式启动：CUDA 无法在 fork 出的子进程中初始化，而 spawn 的
 子进程为全新解释器，与父进程是否已查询过 CUDA 无关。
@@ -19,44 +20,52 @@ import os
 import sys
 import time
 
-import numpy as np
-
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from deepscalper.baselines import run_bah, run_mv, run_predictor, run_tsm
-from deepscalper.config import Config
-from deepscalper.data import load_days, split_days
-from deepscalper.dqn import evaluate_dqn, train_dqn
-from deepscalper.features import fit_feature_stats
-from deepscalper.metrics import financial_metrics
-from deepscalper.model import resolve_device
-from deepscalper.train import build_markets, evaluate_greedy, train_agent
+from gridscalper.baselines import run_grid_scan, run_hold_base, run_open_grid
+from gridscalper.config import Config
+from gridscalper.env import action_params
+from gridscalper.data import load_days, split_days
+from gridscalper.features import fit_feature_stats
+from gridscalper.model import resolve_device
+from gridscalper.train import build_markets, evaluate, train_agent
 
+# 三个分支各做一次消融（固定该分支，其余照常学习），另有 hindsight 与波动率辅助任务消融
 RL_VARIANTS = {
-    "DS": {"hindsight": True, "aux_task": True},
-    "DS-NH": {"hindsight": False, "aux_task": True},
-    "DS-NA": {"hindsight": True, "aux_task": False},
+    "GRID": {},
+    "GRID-NH": {"hindsight": False},
+    "GRID-NA": {"aux_task": False},
+    "GRID-FW": {"fixed_width": 0.15},
+    "GRID-FT": {"fixed_tilt": 0},
+    "GRID-FS": {"fixed_size": 3},
 }
-RULE_METHODS = ("BAH", "MV", "TSM")          # 无需训练、无随机种子
-PREDICTOR_METHODS = ("LGBM", "MLP", "GRU")
+RULE_METHODS = ("HOLD", "OPEN", "SCAN")   # 无需训练、无随机种子
 
 GPU_WORKERS = 2  # 单卡下的并行作业数：作业瓶颈在 CPU 侧观测重建，少量并发即可打满
 
 
+def _variant_kwargs(method: str, cfg: Config) -> dict:
+    """将变体说明翻译为 train_agent 的参数（消融分支转为档位索引）。"""
+    spec = dict(RL_VARIANTS[method])
+    gears = (
+        cfg.half_widths.index(spec.pop("fixed_width")) if "fixed_width" in spec else None,
+        cfg.tilts.index(spec.pop("fixed_tilt")) if "fixed_tilt" in spec else None,
+        cfg.sizes.index(spec.pop("fixed_size")) if "fixed_size" in spec else None,
+    )
+    return {**spec, "fixed_gears": gears}
+
+
+def _uses_hindsight(method: str) -> bool:
+    return method in RL_VARIANTS and RL_VARIANTS[method].get("hindsight", True)
+
+
 def _result_path(cfg: Config, job: dict) -> str:
-    """结果文件名：方法 [_h视野] [_seed种子]；仅含 hindsight bonus 的方法带视野后缀。"""
+    """结果文件名：方法 [_w权重] [_lamλ] [_seed种子]；不适用的超参不出现在文件名中。"""
     parts = [job["method"]]
-    if job["hindsight_ticks"] is not None:
-        parts.append(f"h{job['hindsight_ticks']}")
-    if job["seed"] is not None:
-        parts.append(f"seed{job['seed']}")
+    for key, tag in (("hindsight_weight", "w"), ("inventory_lambda", "lam"), ("seed", "seed")):
+        if job[key] is not None:
+            parts.append(f"{tag}{job[key]:g}")
     return os.path.join(cfg.result_dir, job["symbol"], "_".join(parts) + ".json")
-
-
-def _untrained_payload(daily: np.ndarray, fills: list[int]) -> dict:
-    """传统 / 预测式方法的结果载荷，字段与 RL 方法（train_log 除外）保持一致。"""
-    return {**financial_metrics(daily), "daily_returns": daily.tolist(),
-            "avg_fills_per_day": float(np.mean(fills))}
 
 
 def _save(path: str, payload: dict) -> None:
@@ -71,10 +80,11 @@ def run_job(job: dict, cfg: Config) -> str:
     label = f"{symbol}/{os.path.splitext(os.path.basename(out))[0]}"
     if os.path.exists(out):
         return f"skip {label}"
-    if job["hindsight_ticks"] is not None:
-        cfg = dataclasses.replace(cfg, hindsight_ticks=job["hindsight_ticks"])
+    overrides = {k: job[k] for k in ("hindsight_weight", "inventory_lambda")
+                 if job[k] is not None}
+    cfg = dataclasses.replace(cfg, **overrides)
     t0 = time.time()
-    days = load_days(symbol, cfg.data_dir)
+    days = load_days(symbol, cfg.data_dir, cfg.atr_days)
     train_d, val_d, test_d = split_days(days, cfg.train_ratio, cfg.val_ratio)
     train_m = build_markets(train_d, cfg)
     val_m = build_markets(val_d, cfg)
@@ -86,44 +96,46 @@ def run_job(job: dict, cfg: Config) -> str:
     for m in train_m + val_m + test_m:
         m.set_stats(stats)
 
-    split_info = {"train": len(train_m), "val": len(val_m), "test": len(test_m)}
-    prefix = f"[{label}]"
-
-    if method in RULE_METHODS:
-        fn = {"BAH": run_bah, "MV": run_mv, "TSM": run_tsm}[method]
-        payload = _untrained_payload(*fn(test_m, cfg))
-    elif method in PREDICTOR_METHODS:
-        payload = _untrained_payload(*run_predictor(method, train_m, test_m, cfg, seed=seed))
-    elif method == "DQN":
-        net, log = train_dqn(cfg, train_m, val_m, seed=seed, log_prefix=prefix)
-        payload = {**evaluate_dqn(net, test_m, cfg), "train_log": log}
+    if method == "HOLD":
+        payload = run_hold_base(test_m)
+    elif method == "OPEN":
+        payload = run_open_grid(test_m)
+    elif method == "SCAN":
+        payload = run_grid_scan(val_m, test_m)
     else:
-        agent, log = train_agent(cfg, train_m, val_m, seed=seed, log_prefix=prefix, **RL_VARIANTS[method])
-        payload = {**evaluate_greedy(agent, test_m, cfg), "train_log": log}
+        agent, log = train_agent(cfg, train_m, val_m, seed=seed, log_prefix=f"[{label}]",
+                                 **_variant_kwargs(method, cfg))
+        payload = {**evaluate(test_m, lambda obs: action_params(cfg, agent.greedy(obs))), "train_log": log}
 
     payload.update({"symbol": symbol, "method": method, "seed": seed,
-                    "hindsight_ticks": job["hindsight_ticks"],
-                    "split_days": split_info, "elapsed_sec": round(time.time() - t0, 1)})
+                    "hindsight_weight": job["hindsight_weight"],
+                    "inventory_lambda": job["inventory_lambda"],
+                    "split_days": {"train": len(train_m), "val": len(val_m), "test": len(test_m)},
+                    "elapsed_sec": round(time.time() - t0, 1)})
     _save(out, payload)
     return f"done {label} TR={payload['TR']:.4f} ({payload['elapsed_sec']}s)"
 
 
 def make_jobs(
-    symbols: list[str], seeds: tuple[int, ...], methods: list[str], horizons: tuple[int, ...]
+    symbols: list[str], seeds: tuple[int, ...], methods: list[str],
+    weights: tuple[float, ...], lambdas: tuple[float, ...],
 ) -> list[dict]:
-    """展开 (标的 × 方法 × 种子 × hindsight 视野) 作业矩阵。
+    """展开 (标的 × 方法 × 种子 × w × λ) 作业矩阵。
 
-    仅 hindsight bonus 生效的方法随视野展开，其余方法与该超参无关（视野记为 None）。
+    基线无需训练、与两个超参均无关；`GRID-NH` 关闭 hindsight bonus，故不随 w 展开。
+    不适用的超参记为 None，作业沿用 Config 的默认值。
     """
     jobs = []
     for symbol in symbols:
         for method in methods:
-            hs = horizons if RL_VARIANTS.get(method, {}).get("hindsight") else (None,)
-            ss = (None,) if method in RULE_METHODS else seeds
-            jobs += [{"symbol": symbol, "method": method, "seed": s, "hindsight_ticks": h}
-                     for h in hs for s in ss]
-    order = {"BAH": 0, "MV": 0, "TSM": 0, "LGBM": 1, "MLP": 2, "GRU": 3, "DQN": 4}
-    return sorted(jobs, key=lambda j: order.get(j["method"], 5))
+            rl = method in RL_VARIANTS
+            ws = weights if _uses_hindsight(method) else (None,)
+            lams = lambdas if rl else (None,)
+            ss = seeds if rl else (None,)
+            jobs += [{"symbol": symbol, "method": method, "seed": s,
+                      "hindsight_weight": w, "inventory_lambda": lam}
+                     for w in ws for lam in lams for s in ss]
+    return sorted(jobs, key=lambda j: j["method"] in RL_VARIANTS)  # 基线先跑
 
 
 def default_workers(cfg: Config) -> int:
@@ -138,17 +150,19 @@ def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--symbols", nargs="+", default=["301308", "688030"])
     p.add_argument("--seeds", nargs="+", type=int, default=[0, 1, 2])
-    p.add_argument("--methods", nargs="+",
-                   choices=[*RULE_METHODS, *PREDICTOR_METHODS, "DQN", *RL_VARIANTS],
-                   default=["BAH", "MV", "TSM", "LGBM", "MLP", "GRU", "DQN", "DS-NA", "DS-NH", "DS"])
-    p.add_argument("--hindsight-ticks", nargs="+", type=int, default=[cfg.hindsight_ticks],
-                   help="hindsight 视野档位（tick），给多个值即做敏感性实验，如 300 600 900 1200")
+    p.add_argument("--methods", nargs="+", choices=[*RULE_METHODS, *RL_VARIANTS],
+                   default=[*RULE_METHODS, *RL_VARIANTS])
+    p.add_argument("--hindsight-weights", nargs="+", type=float, default=[cfg.hindsight_weight],
+                   help="hindsight 权重 w 的档位，给多个值即展开超参梯子（design 6.2）")
+    p.add_argument("--inventory-lambdas", nargs="+", type=float, default=[cfg.inventory_lambda],
+                   help="存货惩罚 λ 的档位，给多个值即展开超参梯子（design 6.2）")
     p.add_argument("--workers", type=int, default=None, help="并行作业数，缺省按设备自适应")
     args = p.parse_args()
 
     device = resolve_device(cfg)
     workers = args.workers if args.workers is not None else default_workers(cfg)
-    jobs = make_jobs(args.symbols, tuple(args.seeds), args.methods, tuple(args.hindsight_ticks))
+    jobs = make_jobs(args.symbols, tuple(args.seeds), args.methods,
+                     tuple(args.hindsight_weights), tuple(args.inventory_lambdas))
     pending = [j for j in jobs if not os.path.exists(_result_path(cfg, j))]
     print(f"jobs: {len(jobs)} total, {len(pending)} pending; device={device} workers={workers}", flush=True)
 

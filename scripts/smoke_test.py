@@ -1,4 +1,4 @@
-"""冒烟测试：加载少量交易日，跑通环境与一次网络更新，并测量耗时。"""
+"""冒烟测试：加载少量交易日，跑通网格环境与一次网络更新，并测量耗时。"""
 
 import os
 import sys
@@ -6,70 +6,79 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from deepscalper.agent import BDQAgent
-from deepscalper.buffer import Transition
-from deepscalper.config import Config
-from deepscalper.data import load_days
-from deepscalper.env import DayMarket, TradingEnv
-from deepscalper.features import fit_feature_stats
+from gridscalper.agent import BDQAgent
+from gridscalper.baselines import run_fixed_grid
+from gridscalper.buffer import Transition
+from gridscalper.config import Config
+from gridscalper.data import load_days
+from gridscalper.env import DayMarket, StepResult, TradingEnv, action_params
+from gridscalper.features import fit_feature_stats
 
 
-def main():
+def interact(env: TradingEnv, cfg: Config, agent: BDQAgent, day_id: int = 0) -> StepResult:
+    """交互一步并入队，返回环境结果。"""
+    obs = env.observation()
+    action = agent.act(obs, epsilon=1.0)
+    t, priv_hist = env.t, env.priv_window(env.t)
+    res = env.step(action_params(cfg, action))
+    agent.push(Transition(day_id, t, action, res.train_reward, res.tau,
+                          res.t if not res.done else -1, res.done,
+                          priv_hist, res.priv_hist, res.vol_label))
+    return res
+
+
+def main(symbol: str):
     cfg = Config()
     t0 = time.time()
-    days = load_days("301308", cfg.data_dir)
-    print(f"load_days: {time.time()-t0:.1f}s, {len(days)} days")
+    days = load_days(symbol, cfg.data_dir, cfg.atr_days)
+    print(f"load_days({symbol}): {time.time()-t0:.1f}s, {len(days)} days")
 
     t0 = time.time()
     m = DayMarket(days[40], cfg)
     m.set_stats(fit_feature_stats([m], cfg) if cfg.normalize else None)
-    print(f"DayMarket build: {time.time()-t0:.2f}s, n={m.n}, decisions={len(m.decision_points)}")
+    print(f"DayMarket build: {time.time()-t0:.2f}s, n={m.n}, atr={m.atr:.3f}, p0={m.p0:.2f}")
 
     agent = BDQAgent(cfg, seed=0)
-    env = TradingEnv(m, cfg)
+    env = TradingEnv(m)
     obs = env.observation()
     print("obs shapes:", obs.micro_lob.shape, obs.private.shape, obs.macro.shape)
 
-    # 交互 30 步并计时
+    # 随机策略跑完一天并计时
     t0 = time.time()
-    for i in range(30):
-        action = agent.act(obs, epsilon=1.0)
-        t_idx, priv_hist = env.step_idx, env.priv_hist.copy()
-        res = env.step(action)
-        agent.push(Transition(0, t_idx, action[0], action[1], res.train_reward,
-                              res.t if not res.done else -1, res.done,
-                              priv_hist, res.priv_hist, res.vol_label))
+    reward_sum = 0.0
+    while True:
+        res = interact(env, cfg, agent)
+        reward_sum += res.reward
         if res.done:
             break
-        obs = res.obs
-    print(f"30 env steps: {time.time()-t0:.2f}s, nv={env.net_value():.4f}")
+    accounting_error = reward_sum - (env.net_value() - 1.0)
+    assert abs(accounting_error) < 1e-10
+    print(f"one random day: {time.time()-t0:.2f}s, steps={env.n_steps}, "
+          f"fills={len(env.fills)}, nv={env.net_value():.4f}, "
+          f"accounting_error={accounting_error:.1e}")
 
     # 填满 buffer 做一次更新并计时
-    env = TradingEnv(m, cfg)
-    obs = env.observation()
-    t0 = time.time()
     while len(agent.buffer) < cfg.batch_size:
-        action = agent.act(obs, epsilon=1.0)
-        t_idx, priv_hist = env.step_idx, env.priv_hist.copy()
-        res = env.step(action)
-        agent.push(Transition(0, t_idx, action[0], action[1], res.train_reward,
-                              res.t if not res.done else -1, res.done,
-                              priv_hist, res.priv_hist, res.vol_label))
-        if res.done:
-            env = TradingEnv(m, cfg)
-            obs = env.observation()
-        else:
-            obs = res.obs
+        env = TradingEnv(m)
+        while True:
+            if interact(env, cfg, agent).done:
+                break
     t0 = time.time()
     loss = agent.update([m], beta=0.4)
     print(f"one update (batch {cfg.batch_size}): {time.time()-t0:.3f}s loss={loss:.4e}")
 
-    # 贪心前向计时
+    # 固定参数网格基线与贪心前向计时
+    t0 = time.time()
+    fixed = run_fixed_grid([m], half_width=0.15, size=3)
+    print(f"fixed grid (h=0.15,q=3): {time.time()-t0:.2f}s TR={fixed['TR']:.4f} "
+          f"fills={fixed['diagnostics']['n_fills']:.0f} "
+          f"mean_tau={fixed['diagnostics']['mean_tau']:.1f}")
+
     t0 = time.time()
     for _ in range(20):
-        agent.greedy(obs)
+        agent.greedy(env.observation())
     print(f"20 greedy forwards: {time.time()-t0:.2f}s")
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1] if len(sys.argv) > 1 else "301308")
