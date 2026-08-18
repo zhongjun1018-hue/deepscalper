@@ -31,38 +31,43 @@ uv sync                # torch(CUDA 12.8) / numpy / pandas / pyarrow / wandb
 # 全量实验（基线 + RL 及消融，多进程并行；幂等，可中断后续跑）
 .venv/bin/python scripts/run_all.py --symbols 301308 688030
 
+# 滚动前向折数（缺省 2；折数上限由历史长度决定）
+.venv/bin/python scripts/run_all.py --folds 3
+
 # 超参梯子：hindsight 权重 w 与风险厌恶 λ
 .venv/bin/python scripts/run_all.py --methods GRID \
-    --hindsight-weights 0.02 0.05 0.1 0.2 --inventory-lambdas 0 3 10 30 100
+    --hindsight-weights 0.02 0.05 0.1 0.2 --inventory-lambdas 0 1 3 10 30
 
 # 不联网记录（离线落盘后 wandb sync）或完全关闭
 .venv/bin/python scripts/run_all.py --wandb-mode offline
 .venv/bin/python scripts/run_all.py --wandb-mode disabled
 
-# 按验证集 SR 锁定 (w, λ)，汇总锁定配置的测试集指标
+# 按验证集 SR 锁定 (w, λ)，按折汇总测试集指标与各段行情状态
 .venv/bin/python scripts/summarize.py
 
 # 单元测试
 .venv/bin/python -m unittest discover -s tests
 ```
 
-结果写入 `results/<symbol>/<method>[_w<权重>][_lam<λ>][_seed<k>].json`，
-含四指标、逐日超额净值与闭环率、design 7.4 的补充指标。并行度缺省按设备自适应：
+结果写入 `results/<symbol>/fold_<折>/<method>[_w<权重>][_lam<λ>][_seed<k>].json`，
+含四指标、逐日超额净值与闭环率、design 7.4 的补充指标，以及训练 / 验证 / 测试三段的
+行情状态。汇总表写入 `results/summary.csv`。并行度缺省按设备自适应：
 CUDA 下取 2（避免争抢显存），CPU 下取 `核数 / Config.num_threads`，可用 `--workers` 覆盖。
 
 每个 RL 作业同时建一个 wandb run（项目 `gridscalper`，`--wandb-project` 可改）：
-每个 epoch 内验证 3 次，记录训练奖励、Q 损失、波动率辅助损失与验证 TR、SR 曲线
-（横轴为累计梯度更新次数）；训练结束后记录测试集四指标、日均买卖笔数与
+每个 epoch 内验证 3 次，记录训练奖励、Q 损失、波动率辅助损失与验证 TR、SR 及选模判据
+SR_window 曲线（横轴为累计梯度更新次数）；训练结束后记录测试集四指标、日均买卖笔数与
 日均闭环率 2·min(Ns, Nb)/(Ns + Nb)，以及逐日超额收益与闭环率表（design 7.5）。
 
-每个标的单独训练一个智能体；只有偏好超参 $(w,\lambda)$ 与各档位表跨标的共用，
+每个标的、每折单独训练一个智能体；只有偏好超参 $(w,\lambda)$ 与各档位表跨标的共用，
 选参只用验证集（design 7.1）。
 
 ## 关键参数
 
 底仓 50 手 / 仓位带 [0, 100] 手 / 半宽 7 档（0.075–0.30 × ATR₃）/ 倾斜 7 档 /
-数量 4 档（0, 2, 3, 5 手）/ 超时 60 tick / 每 tick 折扣 0.9995 / 存货惩罚 λ = 30 /
-w = 0.1 / η = 1.0 / 6:2:2 按日切分 / 5 epochs（每 epoch 验证 3 次）/ 3 种子。
+数量 4 档（0, 2, 3, 5 手）/ 超时 60 tick / 每 tick 折扣 0.9995 / 存货惩罚 λ = 3 /
+w = 0.1 / η = 1.0 / 滚动前向 2 折（末折 6.5:1.5:2）/ 5 epochs（每 epoch 验证 3 次，
+选模取最近 3 点均值）/ 3 种子。
 常开网格参照基线为 h = 0.10 × ATR₃、q = 3 手。
 当前实验不计显性费用（佣金与印花税置零，见 design 3.4），执行成本照常记账。
 修改见 `gridscalper/config.py`。

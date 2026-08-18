@@ -1,8 +1,8 @@
 """并行实验运行器：对指定标的执行网格 RL 的全部变体与基线。
 
-每个 (标的, 方法, 种子, w, λ) 为一个独立作业，结果写入
-results/<symbol>/<method>[_w<权重>][_lam<λ>][_seed<k>].json；已存在的作业自动跳过，
-因此脚本可安全重复执行（断点续跑）。w 与 λ 给多个值即展开为超参梯子，
+每个 (标的, 折, 方法, 种子, w, λ) 为一个独立作业，结果按折写入
+results/<symbol>/fold_<折>/<method>[_w<权重>][_lam<λ>][_seed<k>].json；
+已存在的作业自动跳过，因此脚本可安全重复执行（断点续跑）。w 与 λ 给多个值即展开为超参梯子，
 由 summarize.py 按验证集 SR 选优（design 6.2 / 7.1）。
 
 作业进程以 spawn 方式启动：CUDA 无法在 fork 出的子进程中初始化，而 spawn 的
@@ -25,11 +25,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from gridscalper.baselines import run_grid_scan, run_hold_base, run_open_grid
 from gridscalper.config import Config
 from gridscalper.env import action_params
-from gridscalper.data import load_days, split_days
+from gridscalper.data import load_days, walk_forward_splits
 from gridscalper.features import fit_feature_stats
 from gridscalper.model import resolve_device
 from gridscalper.tracking import Tracker
-from gridscalper.train import build_markets, evaluate, train_agent
+from gridscalper.train import build_markets, evaluate, regime_stats, train_agent
 
 # 三个分支各做一次消融（固定该分支，其余照常学习），另有 hindsight 与波动率辅助任务消融
 RL_VARIANTS = {
@@ -61,12 +61,14 @@ def _uses_hindsight(method: str) -> bool:
 
 
 def _result_path(cfg: Config, job: dict) -> str:
-    """结果文件名：方法 [_w权重] [_lamλ] [_seed种子]；不适用的超参不出现在文件名中。"""
+    """结果文件名：方法 [_w权重] [_lamλ] [_seed种子]；折由目录承担，不适用的超参不出现在文件名中。"""
     parts = [job["method"]]
     for key, tag in (("hindsight_weight", "w"), ("inventory_lambda", "lam"), ("seed", "seed")):
         if job[key] is not None:
             parts.append(f"{tag}{job[key]:g}")
-    return os.path.join(cfg.result_dir, job["symbol"], "_".join(parts) + ".json")
+    return os.path.join(
+        cfg.result_dir, job["symbol"], f"fold_{job['fold']}", "_".join(parts) + ".json"
+    )
 
 
 def _save(path: str, payload: dict) -> None:
@@ -79,7 +81,7 @@ def run_job(job: dict, cfg: Config) -> str:
     symbol, method, seed = job["symbol"], job["method"], job["seed"]
     out = _result_path(cfg, job)
     run_name = os.path.splitext(os.path.basename(out))[0]
-    label = f"{symbol}/{run_name}"
+    label = f"{symbol}/fold_{job['fold']}/{run_name}"
     if os.path.exists(out):
         return f"skip {label}"
     overrides = {k: job[k] for k in ("hindsight_weight", "inventory_lambda")
@@ -87,7 +89,8 @@ def run_job(job: dict, cfg: Config) -> str:
     cfg = dataclasses.replace(cfg, **overrides)
     t0 = time.time()
     days = load_days(symbol, cfg.data_dir, cfg.atr_days)
-    train_d, val_d, test_d = split_days(days, cfg.train_ratio, cfg.val_ratio)
+    train_d, val_d, test_d = walk_forward_splits(
+        days, cfg.train_ratio, cfg.val_ratio, cfg.n_folds)[job["fold"]]
     train_m = build_markets(train_d, cfg)
     val_m = build_markets(val_d, cfg)
     test_m = build_markets(test_d, cfg)
@@ -105,7 +108,7 @@ def run_job(job: dict, cfg: Config) -> str:
     elif method == "SCAN":
         payload = run_grid_scan(val_m, test_m)
     else:
-        # 只有 RL 作业有训练曲线；规则基线的测试指标由 results/*.json 与 summarize.py 覆盖
+        # 只有 RL 作业有训练曲线；规则基线的测试指标由结果文件与 summarize.py 覆盖
         tracker = Tracker(cfg, run_name, job)
         agent, log = train_agent(cfg, train_m, val_m, seed=seed, log_prefix=f"[{label}]",
                                  tracker=tracker, **_variant_kwargs(method, cfg))
@@ -113,10 +116,12 @@ def run_job(job: dict, cfg: Config) -> str:
         tracker.log_test(payload)
         tracker.finish()
 
-    payload.update({"symbol": symbol, "method": method, "seed": seed,
+    payload.update({"symbol": symbol, "fold": job["fold"],
+                    "method": method, "seed": seed,
                     "hindsight_weight": job["hindsight_weight"],
                     "inventory_lambda": job["inventory_lambda"],
-                    "split_days": {"train": len(train_m), "val": len(val_m), "test": len(test_m)},
+                    "splits": {name: regime_stats(ms) for name, ms in
+                               (("train", train_m), ("val", val_m), ("test", test_m))},
                     "elapsed_sec": round(time.time() - t0, 1)})
     _save(out, payload)
     return f"done {label} TR={payload['TR']:.4f} ({payload['elapsed_sec']}s)"
@@ -124,23 +129,24 @@ def run_job(job: dict, cfg: Config) -> str:
 
 def make_jobs(
     symbols: list[str], seeds: tuple[int, ...], methods: list[str],
-    weights: tuple[float, ...], lambdas: tuple[float, ...],
+    weights: tuple[float, ...], lambdas: tuple[float, ...], n_folds: int,
 ) -> list[dict]:
-    """展开 (标的 × 方法 × 种子 × w × λ) 作业矩阵。
+    """展开 (标的 × 折 × 方法 × 种子 × w × λ) 作业矩阵。
 
     基线无需训练、与两个超参均无关；`GRID-NH` 关闭 hindsight bonus，故不随 w 展开。
     不适用的超参记为 None，作业沿用 Config 的默认值。
     """
     jobs = []
     for symbol in symbols:
-        for method in methods:
-            rl = method in RL_VARIANTS
-            ws = weights if _uses_hindsight(method) else (None,)
-            lams = lambdas if rl else (None,)
-            ss = seeds if rl else (None,)
-            jobs += [{"symbol": symbol, "method": method, "seed": s,
-                      "hindsight_weight": w, "inventory_lambda": lam}
-                     for w in ws for lam in lams for s in ss]
+        for fold in range(n_folds):
+            for method in methods:
+                rl = method in RL_VARIANTS
+                ws = weights if _uses_hindsight(method) else (None,)
+                lams = lambdas if rl else (None,)
+                ss = seeds if rl else (None,)
+                jobs += [{"symbol": symbol, "fold": fold, "method": method, "seed": s,
+                          "hindsight_weight": w, "inventory_lambda": lam}
+                         for w in ws for lam in lams for s in ss]
     return sorted(jobs, key=lambda j: j["method"] in RL_VARIANTS)  # 基线先跑
 
 
@@ -162,17 +168,20 @@ def main() -> None:
                    help="hindsight 权重 w 的档位，给多个值即展开超参梯子（design 6.2）")
     p.add_argument("--inventory-lambdas", nargs="+", type=float, default=[cfg.inventory_lambda],
                    help="存货惩罚 λ 的档位，给多个值即展开超参梯子（design 6.2）")
+    p.add_argument("--folds", type=int, default=cfg.n_folds,
+                   help="滚动前向折数，每折的测试窗口依次后移（design 7.1）")
     p.add_argument("--workers", type=int, default=None, help="并行作业数，缺省按设备自适应")
     p.add_argument("--wandb-project", default=cfg.wandb_project, help="wandb 项目名")
     p.add_argument("--wandb-mode", choices=["online", "offline", "disabled"],
                    default=cfg.wandb_mode, help="wandb 记录模式，disabled 即不记录")
     args = p.parse_args()
 
-    cfg = dataclasses.replace(cfg, wandb_project=args.wandb_project, wandb_mode=args.wandb_mode)
+    cfg = dataclasses.replace(cfg, n_folds=args.folds,
+                              wandb_project=args.wandb_project, wandb_mode=args.wandb_mode)
     device = resolve_device(cfg)
     workers = args.workers if args.workers is not None else default_workers(cfg)
     jobs = make_jobs(args.symbols, tuple(args.seeds), args.methods,
-                     tuple(args.hindsight_weights), tuple(args.inventory_lambdas))
+                     tuple(args.hindsight_weights), tuple(args.inventory_lambdas), cfg.n_folds)
     pending = [j for j in jobs if not os.path.exists(_result_path(cfg, j))]
     print(f"jobs: {len(jobs)} total, {len(pending)} pending; device={device} workers={workers}", flush=True)
 

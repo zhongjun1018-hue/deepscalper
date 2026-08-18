@@ -94,11 +94,25 @@ def load_days(symbol: str, data_dir: str, atr_days: int) -> list[DayData]:
     return days
 
 
-def split_days(
-    days: list[DayData], train_ratio: float, val_ratio: float
-) -> tuple[list[DayData], list[DayData], list[DayData]]:
-    """按交易日时序切分训练 / 验证 / 测试集（比例见 Config）。"""
+def walk_forward_splits(
+    days: list[DayData], train_ratio: float, val_ratio: float, n_folds: int
+) -> list[tuple[list[DayData], list[DayData], list[DayData]]]:
+    """滚动前向切分：等长的验证 / 测试窗口逐折后移，训练集为窗口之前的全部交易日。
+
+    末折即按 (train_ratio, val_ratio) 的单次时序切分，其余折依次前移一个测试窗口，
+    因此 n_folds = 1 退化为单次切分。各折测试窗口互不重叠、覆盖不同市场状态，
+    但相邻折的验证窗口落在前一折的测试窗口内，跨折聚合选参时应视其为同一段行情。
+    """
     n = len(days)
-    n_train = int(n * train_ratio)
     n_val = int(n * val_ratio)
-    return days[:n_train], days[n_train : n_train + n_val], days[n_train + n_val :]
+    n_test = n - int(n * train_ratio) - n_val
+    splits = []
+    for fold in range(n_folds):
+        test_end = n - (n_folds - 1 - fold) * n_test
+        test_start, val_start = test_end - n_test, test_end - n_test - n_val
+        if val_start <= 0:
+            raise ValueError(
+                f"{n} 个交易日不足以切出 {n_folds} 折（每折验证 {n_val} 日、测试 {n_test} 日）"
+            )
+        splits.append((days[:val_start], days[val_start:test_start], days[test_start:test_end]))
+    return splits

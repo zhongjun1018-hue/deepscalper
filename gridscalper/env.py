@@ -51,6 +51,7 @@ class DayMarket:
     def __init__(self, day: DayData, cfg: Config):
         f = day.frame
         self.cfg = cfg
+        self.date = day.date
         self.atr = day.atr
         self.pre_close = day.pre_close
         self.bid_p = f[[f"Buy{i}Price" for i in range(1, 11)]].to_numpy(np.float64)
@@ -235,7 +236,7 @@ class Interval:
 class StepResult:
     obs: Observation | None
     reward: float            # 超额 P&L 奖励（评估口径）
-    train_reward: float      # 含 hindsight bonus 与存货惩罚的训练奖励
+    train_reward: float      # 按 σ_d 归一、含 hindsight bonus 与存货惩罚的训练奖励
     done: bool
     t: int                   # 下一决策点的 tick 索引
     tau: int                 # 本决策区间时长（tick）
@@ -422,13 +423,14 @@ class TradingEnv:
         excess = pos_held - cfg.base_position
         b = m.base_value
         reward = ((m.mid[t_next] - m.mid[t]) * excess - cost) / b
-        # 两个只用于训练的塑形项：hindsight bonus 按 τ/K 加权，存货惩罚按区间方差计（6.2）
+        # 两个只用于训练的塑形项：hindsight bonus 按 τ/K 加权，存货惩罚按区间方差计（6.2）。
+        # 训练奖励整体按当日 σ_d 归一，使各交易日尺度一致；归一后区间方差即 load²·τ/N。
         train_reward = reward
         if self.hindsight:
             train_reward += (cfg.hindsight_weight * tau / cfg.timeout_ticks
                              * (m.hindsight_price(t) - m.mid[t]) * excess / b)
         load = excess * m.mid[t] / b
-        train_reward -= cfg.inventory_lambda * load * load * m.sigma_d**2 * tau / m.n
+        train_reward = train_reward / m.sigma_d - cfg.inventory_lambda * load * load * tau / m.n
 
         self.intervals.append(
             Interval(tau=tau, excess=excess, width=width, tilt=tilt, size=size,

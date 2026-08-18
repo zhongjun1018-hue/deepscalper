@@ -22,6 +22,7 @@ EVAL_SERIES = {
     "vol_loss": "train/vol_loss",
     "val_TR": "val/TR",
     "val_SR": "val/SR",
+    "val_SR_window": "val/SR_window",   # 选模判据
 }
 TEST_DIAGNOSTICS = ("n_buys", "n_sells", "closure_rate")
 

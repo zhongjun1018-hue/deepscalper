@@ -47,7 +47,7 @@ class Config:
     # w 与 λ 是偏好参数，此处为缺省档，最终由验证集 SR 在梯子上选优（design 6.2 / 7.1）
     hindsight_weight: float = 0.1   # w（按 τ/K 加权，见 design 6.2）
     vol_loss_weight: float = 1.0    # η
-    inventory_lambda: float = 30.0  # 存货惩罚 λ（无量纲；梯子 {0, 3, 10, 30, 100}）
+    inventory_lambda: float = 3.0   # 存货惩罚 λ（无量纲；梯子 {0, 1, 3, 10, 30}）
 
     # ---- 网络结构 ----
     hidden_size: int = 64
@@ -66,15 +66,17 @@ class Config:
     buffer_capacity: int = 100_000
     per_alpha: float = 0.6
     per_beta_start: float = 0.4
-    per_beta_steps: int = 12_000    # β 线性升至 1.0 所需的更新次数（≈ 默认训练规模）
+    per_beta_steps: int = 12_000    # β 线性升至 1.0 所需的更新次数（≈ 末折训练规模，design 6.3）
     epochs: int = 5
     val_evals_per_epoch: int = 3    # epoch 内均分的验证评估次数（末次落在 epoch 末）
+    val_select_window: int = 3      # 选模所用的验证评估点滑动窗口长度（见 design 7.1）
     eps_start: float = 1.0
     eps_end: float = 0.1
 
-    # ---- 数据切分（6 : 2 : 2，见 design 7.1）----
-    train_ratio: float = 0.6
-    val_ratio: float = 0.2
+    # ---- 数据切分（滚动前向，末折为 6.5 : 1.5 : 2，见 design 7.1）----
+    train_ratio: float = 0.65
+    val_ratio: float = 0.15
+    n_folds: int = 2                # 折数；上限由历史长度决定（每折前移一个测试窗口）
 
     # ---- 实验跟踪（wandb，见 design 7.5）----
     wandb_project: str = "gridscalper"

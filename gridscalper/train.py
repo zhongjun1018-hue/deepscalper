@@ -1,11 +1,14 @@
 """训练与评估流程。
 
 每个 epoch 顺序遍历全部训练交易日，ε-greedy 与环境事件驱动地交互并将转移存入 PER，
-周期性批量更新；epoch 内均分若干评估点，在验证集上以贪心策略评估并按 SR 保存最优模型。
+周期性批量更新；epoch 内均分若干评估点，在验证集上贪心评估，并按滑动窗口内验证 SR
+的均值保存最优模型。
 两段损失、训练奖励与验证指标同步写入 wandb（design 7.5）。
 """
 
 from __future__ import annotations
+
+from collections import deque
 
 import numpy as np
 import torch
@@ -21,6 +24,20 @@ from .tracking import Tracker
 
 def build_markets(days: list[DayData], cfg: Config) -> list[DayMarket]:
     return [m for m in (DayMarket(d, cfg) for d in days) if m.tradable]
+
+
+def regime_stats(markets: list[DayMarket]) -> dict:
+    """交易日集合的行情状态：日内漂移分布、上涨日占比与相对波动。
+
+    训练 / 验证 / 测试段的状态差异是解读测试指标的前提（design 7.1）。
+    """
+    drift = np.array([m.mid[m.n - 1] / m.p0 - 1.0 for m in markets])
+    return {
+        "n_days": len(markets), "start": markets[0].date, "end": markets[-1].date,
+        "drift_mean": float(drift.mean()), "drift_std": float(drift.std()),
+        "up_ratio": float((drift > 0).mean()),
+        "rel_atr": float(np.mean([m.atr / m.pre_close for m in markets])),
+    }
 
 
 def eval_days(n_days: int, n_evals: int) -> set[int]:
@@ -72,6 +89,7 @@ def train_agent(
     # 选模用验证集 SR：训练目标是风险调整后的（存货惩罚），以 TR 选模会系统性偏向高杠杆
     best_val_sr, best_state, history = -np.inf, None, []
     eval_points = eval_days(len(markets), cfg.val_evals_per_epoch)
+    val_window = deque(maxlen=min(cfg.val_select_window, cfg.epochs * len(eval_points)))
     q_losses, vol_losses, day_returns = [], [], []
     for epoch in range(1, cfg.epochs + 1):
         for day_id, m in enumerate(markets):
@@ -112,11 +130,13 @@ def train_agent(
 
             # 评估点之间为一段：奖励与两段损失都按该段的样本取均值
             val = evaluate(val_markets, lambda obs: action_params(cfg, agent.greedy(obs)))
+            val_window.append(val["SR"])
             record = {
                 "epoch": epoch, "day": day_id + 1, "updates": agent.updates,
                 "train_reward": float(np.mean(day_returns)),
                 "q_loss": float(np.mean(q_losses)), "vol_loss": float(np.mean(vol_losses)),
                 "val_TR": val["TR"], "val_SR": val["SR"],
+                "val_SR_window": float(np.mean(val_window)),
             }
             history.append(record)
             q_losses, vol_losses, day_returns = [], [], []
@@ -126,11 +146,14 @@ def train_agent(
                 f"{log_prefix} epoch {epoch}/{cfg.epochs} day {record['day']}/{len(markets)} "
                 f"reward={record['train_reward']:.4f} "
                 f"q_loss={record['q_loss']:.3e} vol_loss={record['vol_loss']:.3e} "
-                f"val_TR={val['TR']:.4f} val_SR={val['SR']:.3f}",
+                f"val_TR={val['TR']:.4f} val_SR={val['SR']:.3f} "
+                f"val_SR_win={record['val_SR_window']:.3f}",
                 flush=True,
             )
-            if val["SR"] > best_val_sr:
-                best_val_sr = val["SR"]
+            # 选模用窗口均值而非单点：单点取 max 是在验证噪声上挑选，评估点越多偏差越大；
+            # 窗口未满时样本更少、噪声更大，不参与选优
+            if len(val_window) == val_window.maxlen and record["val_SR_window"] > best_val_sr:
+                best_val_sr = record["val_SR_window"]
                 best_state = {k: v.clone() for k, v in agent.online.state_dict().items()}
 
     if best_state is not None:
