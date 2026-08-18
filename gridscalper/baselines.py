@@ -1,4 +1,4 @@
-"""基线方法：常开网格、固定参数的二维扫描与买入持有底仓（design 7.2）。
+"""基线方法：常开网格、固定半宽的单维扫描与买入持有底仓（design 7.2）。
 
 三者与 RL 共用同一 TradingEnv，撮合、成本、账户与日终平回底仓的规则完全一致，
 差别只在参数恒定；扫描曲面是无惩罚（风险中性）目标的经验参照，
@@ -13,40 +13,36 @@ from .env import DayMarket, GridParams
 from .metrics import financial_metrics
 from .train import evaluate
 
-OPEN_WIDTH, OPEN_SIZE = 0.10, 3                 # 常开参照基线的半宽（× ATR3）与手数
-SCAN_WIDTHS = (0.075, 0.12, 0.15, 0.19, 0.30)   # × ATR3
-SCAN_SIZES = (2, 3, 5)                          # 手
+OPEN_WIDTH = 0.1                                # 常开参照基线的半宽（× ATR3）
+SCAN_WIDTHS = (0.05, 0.1, 0.15, 0.2, 0.25)      # × ATR3
 
 
-def run_fixed_grid(markets: list[DayMarket], half_width: float, size: int) -> dict:
-    """固定参数的对称网格（$\\mathrm{tilt}\\equiv0$），全天不关、不做任何控制。
+def run_fixed_grid(markets: list[DayMarket], half_width: float, size: int = 1) -> dict:
+    """固定半宽的对称网格，全天不平仓、不做任何控制。
 
     half_width 以 ATR3 为单位，不必落在动作梯子上——规则层与档位表无关。
     """
-    params = GridParams(half_width, tilt=0, size=size)
+    params = GridParams(half_width, size=size)
     return evaluate(markets, lambda obs: params)
 
 
 def run_open_grid(markets: list[DayMarket]) -> dict:
     """常开网格：成功判定的参照基线（design 7.2）。"""
-    return {**run_fixed_grid(markets, OPEN_WIDTH, OPEN_SIZE),
-            "half_width": OPEN_WIDTH, "size": OPEN_SIZE}
+    return {**run_fixed_grid(markets, OPEN_WIDTH), "half_width": OPEN_WIDTH}
 
 
 def run_grid_scan(val_markets: list[DayMarket], test_markets: list[DayMarket]) -> dict:
-    """固定参数网格的二维扫描：格点在验证集上按 SR 选优，报告该格点的测试集指标。
+    """固定半宽网格的单维扫描：格点在验证集上按 SR 选优，报告该格点的测试集指标。
 
     选优协议与 RL 一致，避免在测试集上挑参数；`points` 保留全部格点的测试集结果，
     其 `inventory_load` 为时间加权 $(I/B)^2$，即该格点承担的风险（design 7.4）。
     """
-    grid = [(h, q) for h in SCAN_WIDTHS for q in SCAN_SIZES]
-    val_sr = [run_fixed_grid(val_markets, h, q)["SR"] for h, q in grid]
-    points = [{"half_width": h, "size": q, **run_fixed_grid(test_markets, h, q)}
-              for h, q in grid]
+    val_sr = [run_fixed_grid(val_markets, h)["SR"] for h in SCAN_WIDTHS]
+    points = [{"half_width": h, **run_fixed_grid(test_markets, h)} for h in SCAN_WIDTHS]
     best = points[int(np.argmax(val_sr))]
     return {**{k: best[k] for k in ("TR", "SR", "CR", "SoR", "daily_returns",
                                     "daily_closure_rate", "diagnostics")},
-            "best_point": {"half_width": best["half_width"], "size": best["size"]},
+            "best_point": {"half_width": best["half_width"]},
             "points": points}
 
 

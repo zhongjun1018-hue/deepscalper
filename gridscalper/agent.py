@@ -1,6 +1,6 @@
 """BDQ 智能体：ε-greedy 决策、SMDP 折扣的 TD 更新、目标网络、波动率辅助损失。
 
-总损失 L = L_q + η·L_vol；三个动作分支共享 BDQ 的联合 TD 目标。决策间隔 τ
+总损失 L = L_q + η·L_vol；两个动作分支共享 BDQ 的联合 TD 目标。决策间隔 τ
 由市场决定，故延续价值的折扣为 gamma^τ（gamma 为每 tick 口径，见 design 4.2）。
 """
 
@@ -20,9 +20,13 @@ def _branching_next_value(
     online_q: list[torch.Tensor],
     target_q: list[torch.Tensor],
     fixed_gears: tuple[int | None, ...],
-    off_gear: int,
+    inactive_gears: tuple[int, ...],
 ) -> torch.Tensor:
-    """以在线网络选动作、目标网络估值，并聚合有效的 BDQ 分支。"""
+    """以在线网络选动作、目标网络估值，并聚合有效的 BDQ 分支。
+
+    半宽分支（分支 0）选择网格不触发档（平仓 / 关闭）时，数量分支对执行无意义，
+    延续价值只取半宽分支（design 6.3）。
+    """
     actions, values = [], []
     for fixed, oq, tq in zip(fixed_gears, online_q, target_q):
         if fixed is None:
@@ -35,7 +39,10 @@ def _branching_next_value(
         values.append(tq.gather(1, action).squeeze(1))
     branch_values = torch.stack(values)
     joint = branch_values.mean(0)
-    return torch.where(actions[-1] == off_gear, branch_values[-1], joint)
+    inactive = torch.isin(
+        actions[0], torch.as_tensor(list(inactive_gears), device=actions[0].device)
+    )
+    return torch.where(inactive, branch_values[0], joint)
 
 
 class BDQAgent:
@@ -46,13 +53,13 @@ class BDQAgent:
         cfg: Config,
         seed: int,
         aux_task: bool = True,
-        fixed_gears: tuple[int | None, int | None, int | None] = (None, None, None),
+        fixed_gears: tuple[int | None, int | None] = (None, None),
     ):
         self.cfg = cfg
         self.aux_task = aux_task
         self.fixed_gears = fixed_gears
-        self.branch_sizes = (cfg.n_width, cfg.n_tilt, cfg.n_size)
-        self.off_gear = cfg.sizes.index(0)
+        self.branch_sizes = (cfg.n_width, cfg.n_size)
+        self.inactive_gears = cfg.inactive_gears
         self.device = resolve_device(cfg)
         torch.manual_seed(seed)
         self.rng = np.random.default_rng(seed)
@@ -66,18 +73,18 @@ class BDQAgent:
         self.updates = 0
 
     # ---- 决策 ----
-    def _apply_fixed(self, gears: list[int]) -> tuple[int, int, int]:
+    def _apply_fixed(self, gears: list[int]) -> tuple[int, int]:
         for i, fixed in enumerate(self.fixed_gears):
             if fixed is not None:
                 gears[i] = fixed
-        return gears[0], gears[1], gears[2]
+        return gears[0], gears[1]
 
-    def act(self, obs: Observation, epsilon: float) -> tuple[int, int, int]:
+    def act(self, obs: Observation, epsilon: float) -> tuple[int, int]:
         if self.rng.random() < epsilon:
             return self._apply_fixed([int(self.rng.integers(n)) for n in self.branch_sizes])
         return self.greedy(obs)
 
-    def greedy(self, obs: Observation) -> tuple[int, int, int]:
+    def greedy(self, obs: Observation) -> tuple[int, int]:
         self.online.eval()
         with torch.no_grad():
             q, _ = self.online(*to_batch([obs], self.device))
@@ -121,15 +128,19 @@ class BDQAgent:
                 target_q, _ = self.target(*next_batch)
                 index = torch.as_tensor(keep, device=self.device)
                 next_value[index] = _branching_next_value(
-                    online_q, target_q, self.fixed_gears, self.off_gear
+                    online_q, target_q, self.fixed_gears, self.inactive_gears
                 )
             target = rewards + discount * next_value
 
         w = torch.as_tensor(weights, device=self.device)
         td = [target - qs for qs in q_sel]
-        active = actions[:, -1] != self.off_gear
-        masks = [active, active, torch.ones_like(active)]
-        n_active = 1.0 + 2.0 * active.float()
+        # 半宽分支恒有效；数量分支仅在网格可触发（非平仓 / 关闭档）时参与更新
+        active = ~torch.isin(
+            actions[:, 0],
+            torch.as_tensor(list(self.inactive_gears), device=self.device),
+        )
+        masks = [torch.ones_like(active), active]
+        n_active = 1.0 + active.float()
         sample_loss = sum(mask * error**2 for mask, error in zip(masks, td)) / n_active
         q_loss = (w * sample_loss).mean()
 

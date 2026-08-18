@@ -68,10 +68,10 @@ def main(symbol: str):
     print(f"one update (batch {cfg.batch_size}): {time.time()-t0:.3f}s "
           f"q_loss={q_loss:.4e} vol_loss={vol_loss:.4e}")
 
-    # 固定参数网格基线与贪心前向计时
+    # 固定半宽网格基线与贪心前向计时
     t0 = time.time()
-    fixed = run_fixed_grid([m], half_width=0.15, size=3)
-    print(f"fixed grid (h=0.15,q=3): {time.time()-t0:.2f}s TR={fixed['TR']:.4f} "
+    fixed = run_fixed_grid([m], half_width=0.1)
+    print(f"fixed grid (h=0.1): {time.time()-t0:.2f}s TR={fixed['TR']:.4f} "
           f"fills={fixed['diagnostics']['n_fills']:.0f} "
           f"mean_tau={fixed['diagnostics']['mean_tau']:.1f}")
 

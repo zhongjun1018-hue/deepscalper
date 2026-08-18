@@ -24,21 +24,19 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from gridscalper.baselines import run_grid_scan, run_hold_base, run_open_grid
 from gridscalper.config import Config
-from gridscalper.env import action_params
 from gridscalper.data import load_days, walk_forward_splits
+from gridscalper.env import action_params
 from gridscalper.features import fit_feature_stats
 from gridscalper.model import resolve_device
 from gridscalper.tracking import Tracker
 from gridscalper.train import build_markets, evaluate, regime_stats, train_agent
 
-# 三个分支各做一次消融（固定该分支，其余照常学习），另有 hindsight 与波动率辅助任务消融
+# 固定半宽档的消融（其余分支照常学习），另有 hindsight 与波动率辅助任务消融
 RL_VARIANTS = {
     "GRID": {},
     "GRID-NH": {"hindsight": False},
     "GRID-NA": {"aux_task": False},
-    "GRID-FW": {"fixed_width": 0.15},
-    "GRID-FT": {"fixed_tilt": 0},
-    "GRID-FS": {"fixed_size": 3},
+    "GRID-FW": {"fixed_width": 0.1},
 }
 RULE_METHODS = ("HOLD", "OPEN", "SCAN")   # 无需训练、无随机种子
 
@@ -49,8 +47,7 @@ def _variant_kwargs(method: str, cfg: Config) -> dict:
     """将变体说明翻译为 train_agent 的参数（消融分支转为档位索引）。"""
     spec = dict(RL_VARIANTS[method])
     gears = (
-        cfg.half_widths.index(spec.pop("fixed_width")) if "fixed_width" in spec else None,
-        cfg.tilts.index(spec.pop("fixed_tilt")) if "fixed_tilt" in spec else None,
+        cfg.widths.index(spec.pop("fixed_width")) if "fixed_width" in spec else None,
         cfg.sizes.index(spec.pop("fixed_size")) if "fixed_size" in spec else None,
     )
     return {**spec, "fixed_gears": gears}
@@ -110,11 +107,13 @@ def run_job(job: dict, cfg: Config) -> str:
     else:
         # 只有 RL 作业有训练曲线；规则基线的测试指标由结果文件与 summarize.py 覆盖
         tracker = Tracker(cfg, run_name, job)
-        agent, log = train_agent(cfg, train_m, val_m, seed=seed, log_prefix=f"[{label}]",
-                                 tracker=tracker, **_variant_kwargs(method, cfg))
-        payload = {**evaluate(test_m, lambda obs: action_params(cfg, agent.greedy(obs))), "train_log": log}
-        tracker.log_test(payload)
-        tracker.finish()
+        try:
+            agent, log = train_agent(cfg, train_m, val_m, seed=seed, log_prefix=f"[{label}]",
+                                     tracker=tracker, **_variant_kwargs(method, cfg))
+            payload = {**evaluate(test_m, lambda obs: action_params(cfg, agent.greedy(obs))), "train_log": log}
+            tracker.log_test(payload)
+        finally:
+            tracker.finish()  # 失败路径也要收尾，否则进程池复用本进程时下个作业会并入未关闭的 run
 
     payload.update({"symbol": symbol, "fold": job["fold"],
                     "method": method, "seed": seed,

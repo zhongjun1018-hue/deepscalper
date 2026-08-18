@@ -15,7 +15,7 @@ import numpy as np
 class Transition:
     day_id: int
     t: int                    # 决策点的 tick 索引
-    action: tuple[int, int, int]   # (半宽档, 倾斜档, 数量档)
+    action: tuple[int, int]   # (半宽档, 数量档)
     reward: float             # 训练奖励（含塑形项）
     tau: int                  # 决策区间时长（tick），用于 SMDP 折扣 gamma^tau
     next_t: int               # -1 表示终止

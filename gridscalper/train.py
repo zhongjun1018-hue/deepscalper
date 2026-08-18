@@ -75,7 +75,7 @@ def train_agent(
     seed: int,
     hindsight: bool = True,
     aux_task: bool = True,
-    fixed_gears: tuple[int | None, int | None, int | None] = (None, None, None),
+    fixed_gears: tuple[int | None, int | None] = (None, None),
     log_prefix: str = "",
     tracker: Tracker | None = None,
 ) -> tuple[BDQAgent, dict]:

@@ -7,7 +7,7 @@
 宏观特征（11 维）：将回看窗口聚合为 30 根 20-tick OHLCV bar，计算 10 个相对价格
 指标并补充相对量能指标。
 
-私有状态（8 维，design 5.2）：由 PRIV_RAW_DIM 列的原始记录在 DayMarket.observe
+私有状态（7 维，design 5.2）：由 PRIV_RAW_DIM 列的原始记录在 DayMarket.observe
 中归一得到，原始列见 PRIV_* 常量。
 """
 
@@ -20,11 +20,11 @@ MICRO_LOB_DIM = 40
 MICRO_EXTRA_DIM = 10
 MICRO_DIM = MICRO_LOB_DIM + MICRO_EXTRA_DIM
 MACRO_DIM = 11
-PRIVATE_DIM = 8
+PRIVATE_DIM = 7
 
 # 私有状态的原始记录列（按 tick 保存，归一后喂入 LSTM）
-PRIV_POS, PRIV_CASH, PRIV_CENTER, PRIV_WIDTH, PRIV_TILT, PRIV_SIZE, PRIV_LAST_FILL = range(7)
-PRIV_RAW_DIM = 7
+PRIV_POS, PRIV_CASH, PRIV_CENTER, PRIV_WIDTH, PRIV_SIZE, PRIV_LAST_FILL = range(6)
+PRIV_RAW_DIM = 6
 
 
 class FeatureStats:

@@ -16,7 +16,7 @@ import os
 
 import pandas as pd
 
-METHODS = ["HOLD", "OPEN", "SCAN", "GRID-FW", "GRID-FT", "GRID-FS", "GRID-NH", "GRID-NA", "GRID"]
+METHODS = ["HOLD", "OPEN", "SCAN", "GRID-FW", "GRID-NH", "GRID-NA", "GRID"]
 METRICS = ["TR", "SR", "CR", "SoR"]
 RULE_METHODS = {"HOLD", "OPEN", "SCAN"}
 

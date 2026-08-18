@@ -1,8 +1,11 @@
 """交易环境：成交驱动网格的 SMDP rollout、撮合模拟、奖励与日内统计。
 
 design.md 第 3–7 节的实现：
-  - 动作 (h, tilt, q) 给出两条触发线，向前扫描至触发或超时，区间时长 τ 由市场决定；
-  - 决策点为「成交 / 超时 K tick / 日终」三者先到（4.1），中心只在成交时重置（3.3）；
+  - 动作 (h, q) 给出对称的两条触发线与每笔成交手数，向前扫描至触发或超时，
+    区间时长 τ 由市场决定；
+  - h = 0 时在决策点扫单平回底仓（3.3），h 极大（关闭档）则网格无法触发，
+    超时机制保证两者都不会形成吸收态；
+  - 决策点为「成交 / 超时 K tick / 日终」三者先到（4.1），中心只在网格成交时重置（3.3）；
   - 被动单以对手方一档严格穿越边界为成交条件，成交价为取整后的边界价（3.2）；
   - 奖励扣除底仓的被动收益，训练奖励另加 hindsight bonus 与存货惩罚（6.1–6.2）。
 """
@@ -23,7 +26,6 @@ from .features import (
     PRIV_POS,
     PRIV_RAW_DIM,
     PRIV_SIZE,
-    PRIV_TILT,
     PRIV_WIDTH,
     PRIVATE_DIM,
     FeatureStats,
@@ -151,10 +153,9 @@ class DayMarket:
         private[:, 1] = priv_hist[:, PRIV_CASH] / self.equity0
         private[:, 2] = (self.n - 1 - times) / self.n
         private[:, 3] = (self.mid[times] - priv_hist[:, PRIV_CENTER]) / self.atr
-        private[:, 4] = priv_hist[:, PRIV_WIDTH] / cfg.half_widths[-1]
-        private[:, 5] = priv_hist[:, PRIV_TILT] / cfg.max_tilt
-        private[:, 6] = priv_hist[:, PRIV_SIZE] / cfg.sizes[-1]
-        private[:, 7] = (times - priv_hist[:, PRIV_LAST_FILL]) / self.n
+        private[:, 4] = priv_hist[:, PRIV_WIDTH] / cfg.widths[-1]
+        private[:, 5] = priv_hist[:, PRIV_SIZE] / cfg.sizes[-1]
+        private[:, 6] = (times - priv_hist[:, PRIV_LAST_FILL]) / self.n
         return Observation(
             micro_lob=self.micro_window(t),
             private=private,
@@ -165,7 +166,7 @@ class DayMarket:
         """在快照 t 处按给定价格成交 qty 手（正买负卖）。
 
         返回（现金变动, 手续费, 执行成本）：手续费为显性费用，执行成本为成交价相对
-        中间价的偏离。两者之和即 3.2 的交易成本，与现金账户记账完全一致。
+        中间价的偏离。两者之和即 3.4 的交易成本，与现金账户记账完全一致。
         """
         side = 1.0 if qty > 0 else -1.0
         notional = abs(qty) * price
@@ -200,16 +201,15 @@ class DayMarket:
 
 @dataclass(frozen=True)
 class GridParams:
-    """规则层参数：一次决策所设定的网格形状（design 第 3 节）。"""
+    """规则层参数：一次决策所设定的网格状态（design 第 3 节）。"""
 
-    width: float        # 整体半宽（× ATR3），不必落在动作梯子上
-    tilt: int           # 倾斜档，取 ±max_tilt 时对侧关闭
+    width: float        # 对称半宽（× ATR3），0 表示平回底仓，不必落在动作梯子上
     size: int           # 每次触发成交手数
 
 
-def action_params(cfg: Config, action: tuple[int, int, int]) -> GridParams:
-    """把三分支的动作档位索引翻译为规则层参数。"""
-    return GridParams(cfg.half_widths[action[0]], cfg.tilts[action[1]], cfg.sizes[action[2]])
+def action_params(cfg: Config, action: tuple[int, int]) -> GridParams:
+    """把两分支的动作档位索引（半宽档, 数量档）翻译为规则层参数。"""
+    return GridParams(cfg.widths[action[0]], cfg.sizes[action[1]])
 
 
 @dataclass
@@ -227,8 +227,7 @@ class Interval:
     tau: int
     excess: float       # 区间内恒定的超额敞口 pos − Q0（手）
     width: float        # 生效半宽档（× ATR3）
-    tilt: int
-    size: int
+    size: int           # 生效成交手数（平仓时记 0）
     inventory_load: float  # 区间起点的 (I/B)^2
 
 
@@ -262,22 +261,23 @@ class TradingEnv:
         self.fills: list[Fill] = []
         self.intervals: list[Interval] = []
         self.liquidated = 0.0
+        self.n_flatten = 0        # 决策点平仓次数
+        self.flattened = 0.0      # 决策点平仓累计手数
         # 私有状态按 tick 记录：决策点由事件触发，回看窗口的抽样时刻不再落在决策点上
         self.priv_raw = np.empty((market.n, PRIV_RAW_DIM), dtype=np.float32)
-        self._write_priv(0, self.t, width=0.0, tilt=0, size=0)
+        self._write_priv(0, self.t, width=0.0, size=0)
         # 建网前的填充段不携带网格状态：中心偏离与距上次成交时长均记 0
         self.priv_raw[: self.t + 1, PRIV_CENTER] = market.mid[: self.t + 1]
         self.priv_raw[: self.t + 1, PRIV_LAST_FILL] = np.arange(self.t + 1)
 
     # ---- 私有状态 ----
-    def _write_priv(self, lo: int, hi: int, width: float, tilt: int, size: int) -> None:
+    def _write_priv(self, lo: int, hi: int, width: float, size: int) -> None:
         """将当前账户与网格状态写入 tick 区间 [lo, hi]。"""
         rows = self.priv_raw[lo : hi + 1]
         rows[:, PRIV_POS] = self.pos
         rows[:, PRIV_CASH] = self.cash
         rows[:, PRIV_CENTER] = self.center
         rows[:, PRIV_WIDTH] = width
-        rows[:, PRIV_TILT] = tilt
         rows[:, PRIV_SIZE] = size
         rows[:, PRIV_LAST_FILL] = self.last_fill_tick
 
@@ -291,29 +291,27 @@ class TradingEnv:
         return self.market.observe(self.t, self.priv_window(self.t))
 
     # ---- 撮合 ----
-    def _lines(self, width: float, tilt: int) -> tuple[float | None, float | None]:
-        """当前中心下的两条触发线；倾斜取端点时对侧关闭（返回 None）。
+    def _lines(self, width: float) -> tuple[float, float]:
+        """当前中心下对称的两条触发线（卖出线, 买入线）。
 
-        卖出线向上取整、买入线向下取整到最小变动价位，保证是合法限价且不缩窄名义半宽。
+        半宽为 ATR3 倍数；卖出线向上取整、买入线向下取整到最小变动价位，
+        保证是合法限价且不缩窄名义半宽。
         """
         cfg = self.cfg
         span = max(width * self.market.atr, cfg.min_half_width_ratio * self.center)
-        sell = buy = None
-        if tilt != -cfg.max_tilt:
-            sell = _to_tick(self.center + span * cfg.tilt_ratio ** (-tilt), cfg.tick_size, up=True)
-        if tilt != cfg.max_tilt:
-            buy = _to_tick(self.center - span * cfg.tilt_ratio ** tilt, cfg.tick_size, up=False)
+        sell = _to_tick(self.center + span, cfg.tick_size, up=True)
+        buy = _to_tick(self.center - span, cfg.tick_size, up=False)
         return sell, buy
 
     def _sell_lots(self, size: int) -> float:
-        """卖出侧的有效成交量：受仓位下界截断，余额不足最小申报量时一次性卖出。"""
+        """卖出侧的有效成交量：受当前持仓截断。"""
         return min(float(size), self.pos)
 
     def _buy_lots(self, size: int, price: float) -> float:
-        """买入侧的有效成交量：受仓位上界与现金约束，不足最小申报量时该侧失效。"""
+        """买入侧的有效成交量：受仓位上界与现金约束。"""
         cfg = self.cfg
         lots = min(float(size), cfg.max_position - self.pos)
-        if lots < cfg.min_order_lots:
+        if lots <= 0.0:
             return 0.0
         if self.cash < lots * price * (1.0 + cfg.commission_rate):
             return 0.0
@@ -336,23 +334,26 @@ class TradingEnv:
         self.last_fill_tick = t
         return fee + execution
 
-    def _immediate_fill(self, t: int, sell: float | None, buy: float | None, size: int) -> float:
+    def _immediate_fill(self, t: int, sell: float, buy: float, size: int) -> float:
         """新带宽已把现价甩在带外时，在决策点处按对手价立即成交一笔（3.3）。"""
         if not self.market.valid_book[t]:
             return 0.0
         bid, ask = self.market.bid_p[t, 0], self.market.ask_p[t, 0]
-        if sell is not None and bid > sell:
+        if bid > sell:
             lots = self._sell_lots(size)
             if lots > 0.0:
                 return self._fill(t, -lots, bid, immediate=True)
-        elif buy is not None and ask < buy:
+        elif ask < buy:
             lots = self._buy_lots(size, ask)
             if lots > 0.0:
                 return self._fill(t, lots, ask, immediate=True)
         return 0.0
 
     def _scan(self, t: int, sell: float | None, buy: float | None) -> tuple[int, int]:
-        """自 t+1 起扫描至触发或超时，返回（区间终点 tick, 触发方向 +1 买 / −1 卖 / 0 超时）。"""
+        """自 t+1 起扫描至触发或超时，返回（区间终点 tick, 触发方向 +1 买 / −1 卖 / 0 超时）。
+
+        任一侧为 None 表示该侧关闭（网格关闭时两侧均为 None，区间必然超时结束）。
+        """
         m = self.market
         end = min(t + self.cfg.timeout_ticks, m.n - 1)
         window = slice(t + 1, end + 1)
@@ -367,20 +368,31 @@ class TradingEnv:
         u = t + 1 + int(np.argmax(hit))
         return u, -1 if sell is not None and m.bid_p[u, 0] > sell else 1
 
-    def _liquidate(self, t: int) -> float:
-        """日终平回底仓；申报量或盘口深度不足的残余按中间价估值（3.5）。"""
+    def _sweep_to_base(self, t: int) -> tuple[float, float]:
+        """扫十档盘口把超额敞口平回底仓，返回（成交手数, 交易成本）（3.3 与 3.5 共用路径）。"""
         excess = self.pos - self.cfg.base_position
         if excess == 0.0:
-            return 0.0
-        if abs(excess) < self.cfg.min_order_lots:
-            return 0.0
+            return 0.0, 0.0
         filled, cash_delta, fee, execution = self.market.sweep(t, -excess)
         self.pos += filled
         self.cash += cash_delta
         self.fee_cost += fee
         self.execution_cost += execution
-        self.liquidated = abs(filled)
-        return fee + execution
+        return abs(filled), fee + execution
+
+    def _flatten(self, t: int) -> float:
+        """决策点平仓：h=0 时扫单平回底仓，深度不足的残余留待后续决策点或日终（3.3）。"""
+        if self.pos == self.cfg.base_position:
+            return 0.0
+        filled, cost = self._sweep_to_base(t)
+        self.n_flatten += 1
+        self.flattened += filled
+        return cost
+
+    def _liquidate(self, t: int) -> float:
+        """日终平回底仓；盘口深度不足的残余按中间价估值（3.5）。"""
+        self.liquidated, cost = self._sweep_to_base(t)
+        return cost
 
     # ---- SMDP 步进 ----
     def step(self, params: GridParams) -> StepResult:
@@ -391,25 +403,27 @@ class TradingEnv:
         """
         cfg, m = self.cfg, self.market
         t = self.t
-        width, tilt, size = params.width, params.tilt, params.size
-        if size == 0:
-            width, tilt = 0.0, 0
+        width, size = params.width, params.size
 
-        sell, buy = self._lines(width, tilt)
+        sell = buy = None
         cost = 0.0
-        if size > 0:
+        if width == 0.0:
+            cost += self._flatten(t)
+            size = 0                       # 平仓档不建网格，生效数量记 0
+        else:
+            sell, buy = self._lines(width)
             cost += self._immediate_fill(t, sell, buy, size)
-            sell, buy = self._lines(width, tilt)   # 立即触发后中心已移动，重算触发线
-        # 区间内 pos 恒定，故两侧的有效成交量与开关只需判定一次
-        sell_lots = self._sell_lots(size)
-        buy_lots = self._buy_lots(size, buy) if buy is not None else 0.0
+            sell, buy = self._lines(width)   # 立即触发后中心已移动，重算触发线
+        # 区间内 pos 恒定，故两侧的有效成交量只需判定一次
+        sell_lots = self._sell_lots(size) if size > 0 else 0.0
+        buy_lots = self._buy_lots(size, buy) if size > 0 else 0.0
         pos_held = self.pos
 
         t_next, side = self._scan(
             t, sell if sell_lots > 0.0 else None, buy if buy_lots > 0.0 else None
         )
         tau = t_next - t
-        self._write_priv(t + 1, t_next, width, tilt, size)  # 区间内恒定的私有状态
+        self._write_priv(t + 1, t_next, width, size)  # 区间内恒定的私有状态
 
         if side < 0:
             cost += self._fill(t_next, -sell_lots, sell, immediate=False)
@@ -418,7 +432,7 @@ class TradingEnv:
         done = t_next >= m.n - 1
         if done:
             cost += self._liquidate(t_next)
-        self._write_priv(t_next, t_next, width, tilt, size)  # 区间末成交后的状态
+        self._write_priv(t_next, t_next, width, size)  # 区间末成交后的状态
 
         excess = pos_held - cfg.base_position
         b = m.base_value
@@ -433,7 +447,7 @@ class TradingEnv:
         train_reward = train_reward / m.sigma_d - cfg.inventory_lambda * load * load * tau / m.n
 
         self.intervals.append(
-            Interval(tau=tau, excess=excess, width=width, tilt=tilt, size=size,
+            Interval(tau=tau, excess=excess, width=width, size=size,
                      inventory_load=load * load)
         )
         self.n_steps += 1
@@ -470,7 +484,6 @@ class TradingEnv:
         excess = np.asarray([iv.excess for iv in self.intervals])
         chosen_width = np.asarray([iv.width for iv in self.intervals])
         chosen_size = np.asarray([iv.size for iv in self.intervals])
-        chosen_tilt = np.asarray([iv.tilt for iv in self.intervals])
         inventory_load = np.asarray([iv.inventory_load for iv in self.intervals])
         weight = tau / tau.sum()
         n_buy, n_sell = int((qty > 0).sum()), int((qty < 0).sum())
@@ -494,9 +507,10 @@ class TradingEnv:
             "time_weighted_excess": float(weight @ np.abs(excess)),
             "inventory_load": float(weight @ inventory_load),
             "boundary_time": float(weight @ ((excess <= -q0) | (excess >= q0))),
-            "width_time": [float(weight @ (chosen_width == h)) for h in cfg.half_widths],
-            "tilt_time": [float(weight @ (chosen_tilt == v)) for v in cfg.tilts],
+            "width_time": [float(weight @ (chosen_width == h)) for h in cfg.widths],
             "size_time": [float(weight @ (chosen_size == s)) for s in cfg.sizes],
+            "n_flatten": self.n_flatten,
+            "flattened_lots": self.flattened,
             "turnover": turnover / m.equity0,
             "fee_cost": self.fee_cost / m.base_value,        # 相对 B 的当日显性成本
             "execution_cost": self.execution_cost / m.base_value,

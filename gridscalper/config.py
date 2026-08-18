@@ -1,6 +1,6 @@
-"""全局配置：网格规则参数、三分支动作档位与训练超参数（design.md）。
+"""全局配置：网格规则参数、两分支动作档位与训练超参数（design.md）。
 
-窗口结构沿用基线框架（回看 600 tick、hindsight 1200 tick、波动率标签 300 tick），
+窗口结构沿用基线框架（回看 600 tick、hindsight 600 tick、波动率标签 300 tick），
 但决策点改为「成交 / 超时 / 日终」混合触发（design 4.1）。
 持仓、现金、成交额统一以「手 × 每股价格」计量，并以 B = Q0·p0 归一（design 3.5）。
 """
@@ -17,31 +17,29 @@ class Config:
     # ---- tick 窗口结构 ----
     lookback_ticks: int = 600       # 回看窗口（tick 数）
     horizon_ticks: int = 300        # 波动率预测标签窗口（tick 数）
-    hindsight_ticks: int = 1200     # hindsight 视野 H ≈ 1 小时
+    hindsight_ticks: int = 600      # hindsight 视野 H ≈ 30 分钟
     micro_stride: int = 20          # 微观序列抽样间隔：600/20 = 30 步
     bar_ticks: int = 20             # 宏观 OHLCV bar 长度：600/20 = 30 根
-    timeout_ticks: int = 60         # K：超时触发间隔（≈ 3 分钟）
+    timeout_ticks: int = 100        # K：超时触发间隔（≈ 5 分钟）
 
     # ---- 市场规则（A 股）----
     tick_size: float = 0.01         # 最小变动价位（元）
     lot_size: int = 100             # 1 手 = 100 股，用于将盘口挂单量折算为手
-    min_order_lots: int = 2         # 单笔最小申报 200 股；持仓不足时仅允许一次性卖出
-    # 当前实验不计显性费用（见 design 3.4）；成本模型保留，置回 1.0e-4 / 5.0e-4 即恢复
-    commission_rate: float = 0.0        # 佣金（双边）
-    stamp_duty_rate: float = 0.0        # 印花税（仅卖出）
+    # 显性费率取线性参考值（design 3.4）：双边佣金 1e-4，卖出印花税 5e-4
+    commission_rate: float = 1.0e-4        # 佣金（双边）
+    stamp_duty_rate: float = 5.0e-4        # 印花税（仅卖出）
     atr_days: int = 3               # ATR 回溯的完整交易日数 A
 
     # ---- 账户 ----
     base_position: int = 50         # 底仓 Q0（手）；仓位带为 [0, 2Q0]，底仓居中
 
-    # ---- 动作空间（BDQ 三分支）----
-    # 半宽以 ATR3 为单位（跨标的可比），按公比 1.26 等比展开；倾斜端点表示单侧关闭；
-    # 数量最小非零档为 2 手，以满足科创板 200 股的最小申报量。
-    half_widths: tuple[float, ...] = (0.075, 0.095, 0.12, 0.15, 0.19, 0.24, 0.30)
+    # ---- 动作空间（BDQ 两分支：半宽 × 数量）----
+    # 半宽以 ATR3 为单位（跨标的可比）：0 表示在决策点扫单平回底仓（净敞口为零则无操作），
+    # 100 的半宽日内无法触发、效果等同关闭网格；两者都是网格不触发档，
+    # 数量分支在这两档下对执行无意义。数量档是风险规模接口，暂时收缩为 {1}。
+    widths: tuple[float, ...] = (0.0, 0.05, 0.1, 0.15, 0.2, 0.25, 100.0)
+    sizes: tuple[int, ...] = (1,)
     min_half_width_ratio: float = 1e-3  # ε：生效半宽下限（相对中心价，千1），防止网格过密
-    tilts: tuple[int, ...] = (-3, -2, -1, 0, 1, 2, 3)
-    sizes: tuple[int, ...] = (0, 2, 3, 5)
-    tilt_ratio: float = 1.26        # 倾斜梯子公比 k，k^3 ≈ 2
 
     # ---- 奖励 / 辅助任务 ----
     # w 与 λ 是偏好参数，此处为缺省档，最终由验证集 SR 在梯子上选优（design 6.2 / 7.1）
@@ -93,19 +91,16 @@ class Config:
 
     @property
     def n_width(self) -> int:
-        return len(self.half_widths)
-
-    @property
-    def n_tilt(self) -> int:
-        return len(self.tilts)
+        return len(self.widths)
 
     @property
     def n_size(self) -> int:
         return len(self.sizes)
 
     @property
-    def max_tilt(self) -> int:
-        return self.tilts[-1]
+    def inactive_gears(self) -> tuple[int, ...]:
+        """网格不触发的半宽档（平仓 0 与关闭 100，即梯子两端）：此时数量分支无意义。"""
+        return (0, len(self.widths) - 1)
 
     @property
     def micro_steps(self) -> int:
