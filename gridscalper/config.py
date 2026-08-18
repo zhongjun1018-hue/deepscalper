@@ -66,14 +66,19 @@ class Config:
     buffer_capacity: int = 100_000
     per_alpha: float = 0.6
     per_beta_start: float = 0.4
-    per_beta_steps: int = 50_000    # β 由 per_beta_start 线性升至 1.0 所需的更新次数
+    per_beta_steps: int = 12_000    # β 线性升至 1.0 所需的更新次数（≈ 默认训练规模）
     epochs: int = 5
+    val_evals_per_epoch: int = 3    # epoch 内均分的验证评估次数（末次落在 epoch 末）
     eps_start: float = 1.0
     eps_end: float = 0.1
 
     # ---- 数据切分（6 : 2 : 2，见 design 7.1）----
     train_ratio: float = 0.6
     val_ratio: float = 0.2
+
+    # ---- 实验跟踪（wandb，见 design 7.5）----
+    wandb_project: str = "gridscalper"
+    wandb_mode: str = "online"      # "online" / "offline"（离线落盘后补传）/ "disabled"
 
     # ---- 运行控制 ----
     device: str = "auto"            # torch 设备："auto"（有 CUDA 则用）/ "cpu" / "cuda"

@@ -44,7 +44,8 @@ def run_grid_scan(val_markets: list[DayMarket], test_markets: list[DayMarket]) -
     points = [{"half_width": h, "size": q, **run_fixed_grid(test_markets, h, q)}
               for h, q in grid]
     best = points[int(np.argmax(val_sr))]
-    return {**{k: best[k] for k in ("TR", "SR", "CR", "SoR", "daily_returns", "diagnostics")},
+    return {**{k: best[k] for k in ("TR", "SR", "CR", "SoR", "daily_returns",
+                                    "daily_closure_rate", "diagnostics")},
             "best_point": {"half_width": best["half_width"], "size": best["size"]},
             "points": points}
 

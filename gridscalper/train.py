@@ -1,7 +1,8 @@
 """训练与评估流程。
 
 每个 epoch 顺序遍历全部训练交易日，ε-greedy 与环境事件驱动地交互并将转移存入 PER，
-周期性批量更新；每个 epoch 结束后在验证集上以贪心策略评估，按 SR 保存最优模型。
+周期性批量更新；epoch 内均分若干评估点，在验证集上以贪心策略评估并按 SR 保存最优模型。
+两段损失、训练奖励与验证指标同步写入 wandb（design 7.5）。
 """
 
 from __future__ import annotations
@@ -15,14 +16,23 @@ from .config import Config
 from .data import DayData
 from .env import DayMarket, TradingEnv, action_params
 from .metrics import aggregate_diagnostics, financial_metrics
+from .tracking import Tracker
 
 
 def build_markets(days: list[DayData], cfg: Config) -> list[DayMarket]:
     return [m for m in (DayMarket(d, cfg) for d in days) if m.tradable]
 
 
+def eval_days(n_days: int, n_evals: int) -> set[int]:
+    """epoch 内的评估点：把交易日均分为 n_evals 段，取每段最后一日的索引。
+
+    评估点多于交易日时退化为逐日评估。
+    """
+    return {max(n_days * (k + 1) // n_evals - 1, 0) for k in range(n_evals)}
+
+
 def evaluate(markets: list[DayMarket], policy) -> dict:
-    """按 policy(obs) → 规则层参数逐日回放，返回四指标、逐日超额净值与 8.2 的补充指标。"""
+    """按 policy(obs) → 规则层参数逐日回放，返回四指标、逐日超额净值与 7.4 的补充指标。"""
     daily_returns, logs = [], []
     for m in markets:
         env = TradingEnv(m, hindsight=False)
@@ -36,6 +46,7 @@ def evaluate(markets: list[DayMarket], policy) -> dict:
         logs.append(env.episode_log())
     metrics = financial_metrics(np.array(daily_returns))
     metrics["daily_returns"] = [float(x) for x in daily_returns]
+    metrics["daily_closure_rate"] = [log["closure_rate"] for log in logs]
     metrics["diagnostics"] = aggregate_diagnostics(logs)
     return metrics
 
@@ -49,6 +60,7 @@ def train_agent(
     aux_task: bool = True,
     fixed_gears: tuple[int | None, int | None, int | None] = (None, None, None),
     log_prefix: str = "",
+    tracker: Tracker | None = None,
 ) -> tuple[BDQAgent, dict]:
     """训练一个 BDQ 智能体，返回（验证最优智能体, 训练日志）。
 
@@ -59,8 +71,9 @@ def train_agent(
 
     # 选模用验证集 SR：训练目标是风险调整后的（存货惩罚），以 TR 选模会系统性偏向高杠杆
     best_val_sr, best_state, history = -np.inf, None, []
+    eval_points = eval_days(len(markets), cfg.val_evals_per_epoch)
+    q_losses, vol_losses, day_returns = [], [], []
     for epoch in range(1, cfg.epochs + 1):
-        losses = []
         for day_id, m in enumerate(markets):
             env = TradingEnv(m, hindsight=hindsight)
             obs = env.observation()
@@ -86,27 +99,39 @@ def train_agent(
                 if env.n_steps % cfg.update_every == 0:
                     beta = min(1.0, cfg.per_beta_start + (1.0 - cfg.per_beta_start)
                                * agent.updates / cfg.per_beta_steps)
-                    loss = agent.update(markets, beta)
-                    if loss is not None:
-                        losses.append(loss)
+                    losses = agent.update(markets, beta)
+                    if losses is not None:
+                        q_losses.append(losses[0])
+                        vol_losses.append(losses[1])
                 if res.done:
                     break
                 obs = res.obs
+            day_returns.append(env.net_value() - 1.0)   # ε-greedy 回放的当日超额收益
+            if day_id not in eval_points:
+                continue
 
-        val = evaluate(val_markets, lambda obs: action_params(cfg, agent.greedy(obs)))
-        history.append(
-            {"epoch": epoch, "val_TR": val["TR"], "val_SR": val["SR"],
-             "mean_loss": float(np.mean(losses))}
-        )
-        print(
-            f"{log_prefix} epoch {epoch}/{cfg.epochs} "
-            f"loss={history[-1]['mean_loss']:.3e} "
-            f"val_TR={val['TR']:.4f} val_SR={val['SR']:.3f}",
-            flush=True,
-        )
-        if val["SR"] > best_val_sr:
-            best_val_sr = val["SR"]
-            best_state = {k: v.clone() for k, v in agent.online.state_dict().items()}
+            # 评估点之间为一段：奖励与两段损失都按该段的样本取均值
+            val = evaluate(val_markets, lambda obs: action_params(cfg, agent.greedy(obs)))
+            record = {
+                "epoch": epoch, "day": day_id + 1, "updates": agent.updates,
+                "train_reward": float(np.mean(day_returns)),
+                "q_loss": float(np.mean(q_losses)), "vol_loss": float(np.mean(vol_losses)),
+                "val_TR": val["TR"], "val_SR": val["SR"],
+            }
+            history.append(record)
+            q_losses, vol_losses, day_returns = [], [], []
+            if tracker is not None:
+                tracker.log_eval(record)
+            print(
+                f"{log_prefix} epoch {epoch}/{cfg.epochs} day {record['day']}/{len(markets)} "
+                f"reward={record['train_reward']:.4f} "
+                f"q_loss={record['q_loss']:.3e} vol_loss={record['vol_loss']:.3e} "
+                f"val_TR={val['TR']:.4f} val_SR={val['SR']:.3f}",
+                flush=True,
+            )
+            if val["SR"] > best_val_sr:
+                best_val_sr = val["SR"]
+                best_state = {k: v.clone() for k, v in agent.online.state_dict().items()}
 
     if best_state is not None:
         agent.online.load_state_dict(best_state)

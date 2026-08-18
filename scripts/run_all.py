@@ -28,6 +28,7 @@ from gridscalper.env import action_params
 from gridscalper.data import load_days, split_days
 from gridscalper.features import fit_feature_stats
 from gridscalper.model import resolve_device
+from gridscalper.tracking import Tracker
 from gridscalper.train import build_markets, evaluate, train_agent
 
 # 三个分支各做一次消融（固定该分支，其余照常学习），另有 hindsight 与波动率辅助任务消融
@@ -77,7 +78,8 @@ def _save(path: str, payload: dict) -> None:
 def run_job(job: dict, cfg: Config) -> str:
     symbol, method, seed = job["symbol"], job["method"], job["seed"]
     out = _result_path(cfg, job)
-    label = f"{symbol}/{os.path.splitext(os.path.basename(out))[0]}"
+    run_name = os.path.splitext(os.path.basename(out))[0]
+    label = f"{symbol}/{run_name}"
     if os.path.exists(out):
         return f"skip {label}"
     overrides = {k: job[k] for k in ("hindsight_weight", "inventory_lambda")
@@ -103,9 +105,13 @@ def run_job(job: dict, cfg: Config) -> str:
     elif method == "SCAN":
         payload = run_grid_scan(val_m, test_m)
     else:
+        # 只有 RL 作业有训练曲线；规则基线的测试指标由 results/*.json 与 summarize.py 覆盖
+        tracker = Tracker(cfg, run_name, job)
         agent, log = train_agent(cfg, train_m, val_m, seed=seed, log_prefix=f"[{label}]",
-                                 **_variant_kwargs(method, cfg))
+                                 tracker=tracker, **_variant_kwargs(method, cfg))
         payload = {**evaluate(test_m, lambda obs: action_params(cfg, agent.greedy(obs))), "train_log": log}
+        tracker.log_test(payload)
+        tracker.finish()
 
     payload.update({"symbol": symbol, "method": method, "seed": seed,
                     "hindsight_weight": job["hindsight_weight"],
@@ -157,8 +163,12 @@ def main() -> None:
     p.add_argument("--inventory-lambdas", nargs="+", type=float, default=[cfg.inventory_lambda],
                    help="存货惩罚 λ 的档位，给多个值即展开超参梯子（design 6.2）")
     p.add_argument("--workers", type=int, default=None, help="并行作业数，缺省按设备自适应")
+    p.add_argument("--wandb-project", default=cfg.wandb_project, help="wandb 项目名")
+    p.add_argument("--wandb-mode", choices=["online", "offline", "disabled"],
+                   default=cfg.wandb_mode, help="wandb 记录模式，disabled 即不记录")
     args = p.parse_args()
 
+    cfg = dataclasses.replace(cfg, wandb_project=args.wandb_project, wandb_mode=args.wandb_mode)
     device = resolve_device(cfg)
     workers = args.workers if args.workers is not None else default_workers(cfg)
     jobs = make_jobs(args.symbols, tuple(args.seeds), args.methods,

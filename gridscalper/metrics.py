@@ -27,6 +27,12 @@ def financial_metrics(daily_returns: np.ndarray) -> dict[str, float]:
     return {"TR": float(tr), "SR": float(sr), "CR": float(cr), "SoR": float(sor)}
 
 
+def closure_rate(n_buys: int, n_sells: int) -> float:
+    """当日买卖笔数的配对比例 2·min(Nb, Ns)/(Nb + Ns)：1 为完全配对，0 为纯单边。"""
+    total = n_buys + n_sells
+    return 2.0 * min(n_buys, n_sells) / total if total else 0.0
+
+
 def aggregate_diagnostics(logs: list[dict]) -> dict:
     """将 TradingEnv.episode_log 的逐日指标按日平均（分布类字段逐档平均）。"""
     if not logs:

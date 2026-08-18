@@ -64,8 +64,9 @@ def main(symbol: str):
             if interact(env, cfg, agent).done:
                 break
     t0 = time.time()
-    loss = agent.update([m], beta=0.4)
-    print(f"one update (batch {cfg.batch_size}): {time.time()-t0:.3f}s loss={loss:.4e}")
+    q_loss, vol_loss = agent.update([m], beta=0.4)
+    print(f"one update (batch {cfg.batch_size}): {time.time()-t0:.3f}s "
+          f"q_loss={q_loss:.4e} vol_loss={vol_loss:.4e}")
 
     # 固定参数网格基线与贪心前向计时
     t0 = time.time()

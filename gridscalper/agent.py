@@ -87,7 +87,8 @@ class BDQAgent:
     def push(self, tr: Transition) -> None:
         self.buffer.push(tr)
 
-    def update(self, markets: list[DayMarket], beta: float) -> float | None:
+    def update(self, markets: list[DayMarket], beta: float) -> tuple[float, float] | None:
+        """更新一次，返回 (Q 损失, 波动率辅助损失)；样本不足以成批时返回 None。"""
         cfg = self.cfg
         if len(self.buffer) < cfg.batch_size:
             return None
@@ -130,13 +131,15 @@ class BDQAgent:
         masks = [active, active, torch.ones_like(active)]
         n_active = 1.0 + 2.0 * active.float()
         sample_loss = sum(mask * error**2 for mask, error in zip(masks, td)) / n_active
-        loss = (w * sample_loss).mean()
+        q_loss = (w * sample_loss).mean()
 
+        vol_loss = torch.zeros((), device=self.device)
         if self.aux_task:
             vol_target = torch.as_tensor(
                 [tr.vol_label for tr in batch], dtype=torch.float32, device=self.device
             )
-            loss = loss + cfg.vol_loss_weight * F.mse_loss(vol_pred, vol_target)
+            vol_loss = F.mse_loss(vol_pred, vol_target)
+        loss = q_loss + cfg.vol_loss_weight * vol_loss
 
         self.optimizer.zero_grad()
         loss.backward()
@@ -151,4 +154,4 @@ class BDQAgent:
         self.updates += 1
         if self.updates % cfg.target_sync == 0:
             self.target.load_state_dict(self.online.state_dict())
-        return float(loss.item())
+        return float(q_loss.item()), float(vol_loss.item())

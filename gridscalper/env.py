@@ -32,6 +32,7 @@ from .features import (
     future_price_index,
     volatility_label,
 )
+from .metrics import closure_rate
 
 RANGE_TO_SIGMA = math.sqrt(8.0 / math.pi)  # 布朗运动 E[极差] = √(8/π)·σ ≈ 1.6σ
 _TICK_EPS = 1e-9                           # 价位取整的浮点容差
@@ -477,6 +478,7 @@ class TradingEnv:
             "n_immediate": int(sum(f.immediate for f in self.fills)),
             "n_buys": n_buy,
             "n_sells": n_sell,
+            "closure_rate": closure_rate(n_buy, n_sell),
             "n_decisions": len(self.intervals),
             "mean_tau": float(tau.mean()),
             "median_tau": float(np.median(tau)),

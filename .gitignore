@@ -17,6 +17,7 @@ dist/
 *.pt
 *.pth
 results/
+wandb/
 
 # IDE / 系统文件
 .idea/
