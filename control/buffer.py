@@ -22,7 +22,6 @@ class Transition:
     done: bool
     priv_hist: np.ndarray     # 决策时（动作前）的私有状态历史
     next_priv_hist: np.ndarray
-    vol_label: float
 
 
 class PrioritizedReplay:

@@ -2,8 +2,9 @@
 .venv/
 venv/
 
-# 数据（体积大，不入库）
-data/
+# 数据（体积大，不入库；特征定义文档除外）
+data/*
+!data/features.md
 
 # Python 产物
 __pycache__/
@@ -16,8 +17,13 @@ dist/
 *.ckpt
 *.pt
 *.pth
-results/
+cache/
 wandb/
+
+# 各子项目运行产出
+forecast/runs/
+control/runs/
+webviz/data/
 
 # IDE / 系统文件
 .idea/

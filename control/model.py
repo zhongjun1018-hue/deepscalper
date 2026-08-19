@@ -1,8 +1,8 @@
-"""模型：多模态市场编码器 + Branching Dueling Q-Network + 波动率辅助头。
+"""模型：多模态市场编码器 + 标的 embedding + Branching Dueling Q-Network。
 
   (a) 微观编码器：LOB 序列与私有状态序列各经一层 LSTM，取末隐状态拼接；
-  (b) 宏观编码器：OHLCV+技术指标向量经 MLP；
-  (c) 风险辅助任务：市场嵌入经单层 MLP 预测未来波动率；
+  (b) 宏观编码器：bar 级相对指标与窗口统计、LightGBM 预测向量经 MLP；
+  (c) 标的标识：symbol_id 经 embedding 拼接进市场嵌入（统一训练时区分标的）；
   (d) 动作分支：共享状态价值 V 与半宽 / 数量两支优势函数聚合为 Q 值。
 """
 
@@ -37,19 +37,24 @@ class MarketEncoder(nn.Module):
             nn.Linear(cfg.macro_hidden, cfg.macro_hidden),
             nn.ReLU(),
         )
-        self.embed_dim = 2 * h + cfg.macro_hidden
+        self.symbol_emb = nn.Embedding(cfg.n_symbols, cfg.symbol_embed_dim)
+        self.embed_dim = 2 * h + cfg.macro_hidden + cfg.symbol_embed_dim
 
     def forward(
-        self, micro_lob: torch.Tensor, private: torch.Tensor, macro: torch.Tensor
+        self,
+        micro_lob: torch.Tensor,
+        private: torch.Tensor,
+        macro: torch.Tensor,
+        symbol: torch.Tensor,
     ) -> torch.Tensor:
         hb = self.lob_lstm(micro_lob)[1][0][-1]
         hz = self.priv_lstm(private)[1][0][-1]
         ea = self.macro_mlp(macro)
-        return torch.cat([hb, hz, ea], dim=-1)
+        return torch.cat([hb, hz, ea, self.symbol_emb(symbol)], dim=-1)
 
 
 class BDQNetwork(nn.Module):
-    """BDQ：共享状态价值 + 半宽 / 数量两支优势，附波动率预测头。"""
+    """BDQ：共享状态价值 + 半宽 / 数量两支优势。"""
 
     def __init__(self, cfg: Config):
         super().__init__()
@@ -60,25 +65,28 @@ class BDQNetwork(nn.Module):
         self.branch_heads = nn.ModuleList(
             nn.Linear(cfg.trunk_hidden, n) for n in (cfg.n_width, cfg.n_size)
         )
-        self.vol_head = nn.Linear(d, 1)
 
     def forward(
-        self, micro_lob: torch.Tensor, private: torch.Tensor, macro: torch.Tensor
-    ) -> tuple[list[torch.Tensor], torch.Tensor]:
-        e = self.encoder(micro_lob, private, macro)
+        self,
+        micro_lob: torch.Tensor,
+        private: torch.Tensor,
+        macro: torch.Tensor,
+        symbol: torch.Tensor,
+    ) -> list[torch.Tensor]:
+        e = self.encoder(micro_lob, private, macro, symbol)
         s = self.trunk(e)
         v = self.value_head(s)
         advantages = [head(s) for head in self.branch_heads]
-        q = [v + (a - a.mean(dim=-1, keepdim=True)) for a in advantages]
-        return q, self.vol_head(e).squeeze(-1)
+        return [v + (a - a.mean(dim=-1, keepdim=True)) for a in advantages]
 
 
 def to_batch(
     obs_list, device: torch.device
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """将 Observation 列表堆叠为网络输入张量 (micro_lob, private, macro)。"""
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """将 Observation 列表堆叠为网络输入张量 (micro_lob, private, macro, symbol)。"""
     return (
         torch.as_tensor(np.stack([o.micro_lob for o in obs_list])).to(device),
         torch.as_tensor(np.stack([o.private for o in obs_list])).to(device),
         torch.as_tensor(np.stack([o.macro for o in obs_list])).to(device),
+        torch.as_tensor([o.symbol_id for o in obs_list], dtype=torch.long).to(device),
     )

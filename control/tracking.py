@@ -1,6 +1,6 @@
 """wandb 实验跟踪：RL 作业的训练曲线与测试集诊断（design 7.5）。
 
-一个作业对应一个 run：在每个验证评估点记录训练奖励、两段损失与验证指标，训练结束后
+一个作业对应一个 run：在每个验证评估点记录训练奖励、Q 损失与验证指标，训练结束后
 记录测试集的四指标、日均买卖笔数与日均闭环率，并以表格保留逐日超额收益与闭环率。
 曲线横轴为累计梯度更新次数，epoch 一并作为指标记录，可在 UI 中改用其为横轴。
 Config.wandb_mode = "disabled" 时 wandb 自身退化为空操作，无需在调用处分支。
@@ -19,7 +19,6 @@ EVAL_SERIES = {
     "epoch": "epoch",
     "train_reward": "train/reward",
     "q_loss": "train/q_loss",
-    "vol_loss": "train/vol_loss",
     "val_TR": "val/TR",
     "val_SR": "val/SR",
     "val_SR_window": "val/SR_window",   # 选模判据

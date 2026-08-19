@@ -3,27 +3,65 @@
 每个 epoch 顺序遍历全部训练交易日，ε-greedy 与环境事件驱动地交互并将转移存入 PER，
 周期性批量更新；epoch 内均分若干评估点，在验证集上贪心评估，并按滑动窗口内验证 SR
 的均值保存最优模型。
-两段损失、训练奖励与验证指标同步写入 wandb（design 7.5）。
+Q 损失、训练奖励与验证指标同步写入 wandb（design 7.5）。
 """
 
 from __future__ import annotations
 
+import os
 from collections import deque
+from dataclasses import asdict
 
 import numpy as np
 import torch
 
+from data_provider.ticks import DayData
+from strategy.metrics import financial_metrics
+
 from .agent import BDQAgent
 from .buffer import Transition
 from .config import Config
-from .data import DayData
 from .env import DayMarket, TradingEnv, action_params
-from .metrics import aggregate_diagnostics, financial_metrics
+from .features import MACRO_FEATURE_COLUMNS, PRED_DIM, WINDOW_DIM
 from .tracking import Tracker
 
 
-def build_markets(days: list[DayData], cfg: Config) -> list[DayMarket]:
-    return [m for m in (DayMarket(d, cfg) for d in days) if m.tradable]
+def build_markets(
+    days: list[DayData],
+    cfg: Config,
+    cache: dict | None = None,
+    symbol_id: int = 0,
+) -> list[DayMarket]:
+    """由交易日构建 DayMarket；cache 为该标的的统一缓存（windows.load_cache）。
+
+    逐日取窗口特征（只保留进宏观通道的列）与预测的当日行块，横向拼接为 R×(24+5)；
+    缓存缺当日行时补零块。
+    """
+    def window_block(date: str):
+        if cache is None:
+            return None
+        hit = np.flatnonzero(cache["dates"] == date)
+        if not hit.size:
+            return np.zeros((cache["features"].shape[1], WINDOW_DIM + PRED_DIM),
+                            dtype=np.float32)
+        return np.concatenate(
+            [cache["features"][hit[0]][:, MACRO_FEATURE_COLUMNS], cache["preds"][hit[0]]],
+            axis=1)
+
+    markets = (DayMarket(d, cfg, window_block(d.date), symbol_id) for d in days)
+    return [m for m in markets if m.tradable]
+
+
+def aggregate_diagnostics(logs: list[dict]) -> dict:
+    """将 TradingEnv.episode_log 的逐日指标按日平均（分布类字段逐档平均）。"""
+    if not logs:
+        return {}
+    out = {}
+    for key, sample in logs[0].items():
+        values = [log[key] for log in logs]
+        out[key] = (np.mean(values, axis=0).tolist() if isinstance(sample, list)
+                    else float(np.mean(values)))
+    return out
 
 
 def regime_stats(markets: list[DayMarket]) -> dict:
@@ -68,13 +106,18 @@ def evaluate(markets: list[DayMarket], policy) -> dict:
     return metrics
 
 
+def save_checkpoint(agent: BDQAgent, cfg: Config, path: str) -> None:
+    """保存（验证最优的）online 网络权重与配置，供 webviz 回放决策（加载见 control/trace.py）。"""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    torch.save({"state_dict": agent.online.state_dict(), "config": asdict(cfg)}, path)
+
+
 def train_agent(
     cfg: Config,
     markets: list[DayMarket],
     val_markets: list[DayMarket],
     seed: int,
     hindsight: bool = True,
-    aux_task: bool = True,
     fixed_gears: tuple[int | None, int | None] = (None, None),
     log_prefix: str = "",
     tracker: Tracker | None = None,
@@ -84,13 +127,13 @@ def train_agent(
     markets / val_markets 需已挂载标准化统计量（见 fit_feature_stats）。
     """
     torch.set_num_threads(cfg.num_threads)
-    agent = BDQAgent(cfg, seed=seed, aux_task=aux_task, fixed_gears=fixed_gears)
+    agent = BDQAgent(cfg, seed=seed, fixed_gears=fixed_gears)
 
     # 选模用验证集 SR：训练目标是风险调整后的（存货惩罚），以 TR 选模会系统性偏向高杠杆
     best_val_sr, best_state, history = -np.inf, None, []
     eval_points = eval_days(len(markets), cfg.val_evals_per_epoch)
     val_window = deque(maxlen=min(cfg.val_select_window, cfg.epochs * len(eval_points)))
-    q_losses, vol_losses, day_returns = [], [], []
+    q_losses, day_returns = [], []
     for epoch in range(1, cfg.epochs + 1):
         for day_id, m in enumerate(markets):
             env = TradingEnv(m, hindsight=hindsight)
@@ -111,16 +154,14 @@ def train_agent(
                         done=res.done,
                         priv_hist=priv_hist,
                         next_priv_hist=res.priv_hist,
-                        vol_label=res.vol_label,
                     )
                 )
                 if env.n_steps % cfg.update_every == 0:
                     beta = min(1.0, cfg.per_beta_start + (1.0 - cfg.per_beta_start)
                                * agent.updates / cfg.per_beta_steps)
-                    losses = agent.update(markets, beta)
-                    if losses is not None:
-                        q_losses.append(losses[0])
-                        vol_losses.append(losses[1])
+                    q_loss = agent.update(markets, beta)
+                    if q_loss is not None:
+                        q_losses.append(q_loss)
                 if res.done:
                     break
                 obs = res.obs
@@ -128,24 +169,24 @@ def train_agent(
             if day_id not in eval_points:
                 continue
 
-            # 评估点之间为一段：奖励与两段损失都按该段的样本取均值
+            # 评估点之间为一段：奖励与损失都按该段的样本取均值
             val = evaluate(val_markets, lambda obs: action_params(cfg, agent.greedy(obs)))
             val_window.append(val["SR"])
             record = {
                 "epoch": epoch, "day": day_id + 1, "updates": agent.updates,
                 "train_reward": float(np.mean(day_returns)),
-                "q_loss": float(np.mean(q_losses)), "vol_loss": float(np.mean(vol_losses)),
+                "q_loss": float(np.mean(q_losses)),
                 "val_TR": val["TR"], "val_SR": val["SR"],
                 "val_SR_window": float(np.mean(val_window)),
             }
             history.append(record)
-            q_losses, vol_losses, day_returns = [], [], []
+            q_losses, day_returns = [], []
             if tracker is not None:
                 tracker.log_eval(record)
             print(
                 f"{log_prefix} epoch {epoch}/{cfg.epochs} day {record['day']}/{len(markets)} "
                 f"reward={record['train_reward']:.4f} "
-                f"q_loss={record['q_loss']:.3e} vol_loss={record['vol_loss']:.3e} "
+                f"q_loss={record['q_loss']:.3e} "
                 f"val_TR={val['TR']:.4f} val_SR={val['SR']:.3f} "
                 f"val_SR_win={record['val_SR_window']:.3f}",
                 flush=True,

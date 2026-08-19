@@ -1,14 +1,12 @@
-"""BDQ 智能体：ε-greedy 决策、SMDP 折扣的 TD 更新、目标网络、波动率辅助损失。
+"""BDQ 智能体：ε-greedy 决策、SMDP 折扣的 TD 更新、目标网络。
 
-总损失 L = L_q + η·L_vol；两个动作分支共享 BDQ 的联合 TD 目标。决策间隔 τ
-由市场决定，故延续价值的折扣为 gamma^τ（gamma 为每 tick 口径，见 design 4.2）。
+决策间隔 τ 由市场决定，故延续价值的折扣为 gamma^τ（gamma 为每 tick 口径，见 design 4.2）。
 """
 
 from __future__ import annotations
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 
 from .buffer import PrioritizedReplay, Transition
 from .config import Config
@@ -52,11 +50,9 @@ class BDQAgent:
         self,
         cfg: Config,
         seed: int,
-        aux_task: bool = True,
         fixed_gears: tuple[int | None, int | None] = (None, None),
     ):
         self.cfg = cfg
-        self.aux_task = aux_task
         self.fixed_gears = fixed_gears
         self.branch_sizes = (cfg.n_width, cfg.n_size)
         self.inactive_gears = cfg.inactive_gears
@@ -87,15 +83,15 @@ class BDQAgent:
     def greedy(self, obs: Observation) -> tuple[int, int]:
         self.online.eval()
         with torch.no_grad():
-            q, _ = self.online(*to_batch([obs], self.device))
+            q = self.online(*to_batch([obs], self.device))
         return self._apply_fixed([int(b.argmax(-1).item()) for b in q])
 
     # ---- 学习 ----
     def push(self, tr: Transition) -> None:
         self.buffer.push(tr)
 
-    def update(self, markets: list[DayMarket], beta: float) -> tuple[float, float] | None:
-        """更新一次，返回 (Q 损失, 波动率辅助损失)；样本不足以成批时返回 None。"""
+    def update(self, markets: list[DayMarket], beta: float) -> float | None:
+        """更新一次，返回 Q 损失；样本不足以成批时返回 None。"""
         cfg = self.cfg
         if len(self.buffer) < cfg.batch_size:
             return None
@@ -108,7 +104,7 @@ class BDQAgent:
         ]
 
         self.online.train()
-        q, vol_pred = self.online(*to_batch(obs, self.device))
+        q = self.online(*to_batch(obs, self.device))
         actions = torch.as_tensor([tr.action for tr in batch], device=self.device)
         q_sel = [qb.gather(1, actions[:, i, None]).squeeze(1) for i, qb in enumerate(q)]
 
@@ -124,8 +120,8 @@ class BDQAgent:
             keep = [i for i, o in enumerate(next_obs) if o is not None]
             if keep:
                 next_batch = to_batch([next_obs[i] for i in keep], self.device)
-                online_q, _ = self.online(*next_batch)
-                target_q, _ = self.target(*next_batch)
+                online_q = self.online(*next_batch)
+                target_q = self.target(*next_batch)
                 index = torch.as_tensor(keep, device=self.device)
                 next_value[index] = _branching_next_value(
                     online_q, target_q, self.fixed_gears, self.inactive_gears
@@ -144,16 +140,8 @@ class BDQAgent:
         sample_loss = sum(mask * error**2 for mask, error in zip(masks, td)) / n_active
         q_loss = (w * sample_loss).mean()
 
-        vol_loss = torch.zeros((), device=self.device)
-        if self.aux_task:
-            vol_target = torch.as_tensor(
-                [tr.vol_label for tr in batch], dtype=torch.float32, device=self.device
-            )
-            vol_loss = F.mse_loss(vol_pred, vol_target)
-        loss = q_loss + cfg.vol_loss_weight * vol_loss
-
         self.optimizer.zero_grad()
-        loss.backward()
+        q_loss.backward()
         torch.nn.utils.clip_grad_norm_(self.online.parameters(), cfg.grad_clip)
         self.optimizer.step()
 
@@ -165,4 +153,4 @@ class BDQAgent:
         self.updates += 1
         if self.updates % cfg.target_sync == 0:
             self.target.load_state_dict(self.online.state_dict())
-        return float(q_loss.item()), float(vol_loss.item())
+        return float(q_loss.item())

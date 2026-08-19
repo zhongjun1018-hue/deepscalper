@@ -1,34 +1,31 @@
 """全局配置：网格规则参数、两分支动作档位与训练超参数（design.md）。
 
-窗口结构沿用基线框架（回看 600 tick、hindsight 600 tick、波动率标签 300 tick），
-但决策点改为「成交 / 超时 / 日终」混合触发（design 4.1）。
+决策点由「成交 / 超时 / 日终」混合触发（design 4.1），可落在任一 tick 上；
+每个决策点回看 600 tick，hindsight 视野同为 600 tick。
 持仓、现金、成交额统一以「手 × 每股价格」计量，并以 B = Q0·p0 归一（design 3.5）。
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+from data_provider.windows import WindowSpec
 
 
 @dataclass(frozen=True)
 class Config:
     # ---- 路径 ----
     data_dir: str = "data"
-    result_dir: str = "results"
+    result_dir: str = "control/runs"
+    cache_dir: str = "cache"        # 统一缓存目录（cache/<symbol>.npz）
 
-    # ---- tick 窗口结构 ----
-    lookback_ticks: int = 600       # 回看窗口（tick 数）
-    horizon_ticks: int = 300        # 波动率预测标签窗口（tick 数）
-    hindsight_ticks: int = 600      # hindsight 视野 H ≈ 30 分钟
+    # ---- tick 窗口结构（回看与 bar 长度取自 window 规格，避免双份参数）----
+    hindsight_ticks: int = 600      # hindsight 视野 H_hs（design 6.2）
     micro_stride: int = 20          # 微观序列抽样间隔：600/20 = 30 步
-    bar_ticks: int = 20             # 宏观 OHLCV bar 长度：600/20 = 30 根
-    timeout_ticks: int = 100        # K：超时触发间隔（≈ 5 分钟）
+    timeout_ticks: int = 100        # K：超时触发间隔
 
     # ---- 市场规则（A 股）----
     tick_size: float = 0.01         # 最小变动价位（元）
     lot_size: int = 100             # 1 手 = 100 股，用于将盘口挂单量折算为手
-    # 显性费率取线性参考值（design 3.4）：双边佣金 1e-4，卖出印花税 5e-4
-    commission_rate: float = 1.0e-4        # 佣金（双边）
-    stamp_duty_rate: float = 5.0e-4        # 印花税（仅卖出）
-    atr_days: int = 3               # ATR 回溯的完整交易日数 A
+    # 显性费率统一定义在 strategy/costs.py（design 3.3：双边佣金 1e-4，卖出印花税 5e-4）
 
     # ---- 账户 ----
     base_position: int = 50         # 底仓 Q0（手）；仓位带为 [0, 2Q0]，底仓居中
@@ -39,13 +36,18 @@ class Config:
     # 数量分支在这两档下对执行无意义。数量档是风险规模接口，暂时收缩为 {1}。
     widths: tuple[float, ...] = (0.0, 0.05, 0.1, 0.15, 0.2, 0.25, 100.0)
     sizes: tuple[int, ...] = (1,)
-    min_half_width_ratio: float = 1e-3  # ε：生效半宽下限（相对中心价，千1），防止网格过密
 
-    # ---- 奖励 / 辅助任务 ----
+    # ---- 奖励 ----
     # w 与 λ 是偏好参数，此处为缺省档，最终由验证集 SR 在梯子上选优（design 6.2 / 7.1）
     hindsight_weight: float = 0.1   # w（按 τ/K 加权，见 design 6.2）
-    vol_loss_weight: float = 1.0    # η
     inventory_lambda: float = 3.0   # 存货惩罚 λ（无量纲；梯子 {0, 1, 3, 10, 30}）
+
+    # ---- 缓存规格（data_provider.windows 的统一口径；回看、bar、ATR 与半宽下限由此出）----
+    window: WindowSpec = field(default_factory=WindowSpec)
+
+    # ---- 标的标识 ----
+    symbols: tuple[str, ...] = ()   # 本次运行的标的集合，决定 symbol_id 与 embedding 规模
+    symbol_embed_dim: int = 8
 
     # ---- 网络结构 ----
     hidden_size: int = 64
@@ -64,17 +66,12 @@ class Config:
     buffer_capacity: int = 100_000
     per_alpha: float = 0.6
     per_beta_start: float = 0.4
-    per_beta_steps: int = 12_000    # β 线性升至 1.0 所需的更新次数（≈ 末折训练规模，design 6.3）
+    per_beta_steps: int = 12_000    # β 线性升至 1.0 所需的更新次数（≈ 单次切分的训练规模，design 6.3）
     epochs: int = 5
     val_evals_per_epoch: int = 3    # epoch 内均分的验证评估次数（末次落在 epoch 末）
     val_select_window: int = 3      # 选模所用的验证评估点滑动窗口长度（见 design 7.1）
     eps_start: float = 1.0
     eps_end: float = 0.1
-
-    # ---- 数据切分（滚动前向，末折为 6.5 : 1.5 : 2，见 design 7.1）----
-    train_ratio: float = 0.65
-    val_ratio: float = 0.15
-    n_folds: int = 2                # 折数；上限由历史长度决定（每折前移一个测试窗口）
 
     # ---- 实验跟踪（wandb，见 design 7.5）----
     wandb_project: str = "gridscalper"
@@ -83,6 +80,20 @@ class Config:
     # ---- 运行控制 ----
     device: str = "auto"            # torch 设备："auto"（有 CUDA 则用）/ "cpu" / "cuda"
     num_threads: int = 2            # 单训练进程 torch 线程数（配合多进程并行）
+
+    @property
+    def lookback_ticks(self) -> int:
+        """回看窗口长度：与缓存口径同源。"""
+        return self.window.lookback_ticks
+
+    @property
+    def bar_ticks(self) -> int:
+        """宏观 OHLCV bar 长度：与缓存的 bar 聚合口径同源。"""
+        return self.window.bar_ticks
+
+    @property
+    def n_symbols(self) -> int:
+        return max(1, len(self.symbols))
 
     @property
     def max_position(self) -> int:
@@ -109,10 +120,6 @@ class Config:
     @property
     def n_bars(self) -> int:
         return self.lookback_ticks // self.bar_ticks
-
-    def fee_rate(self, side: float) -> float:
-        """显性费率：买入仅佣金，卖出另加印花税（design 3.4）。"""
-        return self.commission_rate + (self.stamp_duty_rate if side < 0 else 0.0)
 
     def epsilon_at(self, epoch: int, progress: float) -> float:
         """epoch 内进度 progress∈[0,1) 时的探索率：前 60% 训练轮次线性退火至 eps_end。"""

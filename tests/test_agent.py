@@ -2,7 +2,7 @@ import unittest
 
 import torch
 
-from gridscalper.agent import _branching_next_value
+from control.agent import _branching_next_value
 
 
 class BranchingTargetTest(unittest.TestCase):

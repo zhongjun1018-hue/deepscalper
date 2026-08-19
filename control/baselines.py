@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import numpy as np
 
+from strategy.metrics import financial_metrics
+
 from .env import DayMarket, GridParams
-from .metrics import financial_metrics
 from .train import evaluate
 
 OPEN_WIDTH = 0.1                                # 常开参照基线的半宽（× ATR3）
