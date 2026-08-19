@@ -43,7 +43,8 @@ uv sync                # torch(CUDA 12.8) / numpy / pandas / lightgbm / matplotl
 以下入口的 `--symbols` 不指定时默认 `data/` 下全部标的。
 
 ```bash
-# 统一缓存预建（幂等，逐标的串行构建 cache/<symbol>.npz；其余入口也会按需自动构建）
+# 统一缓存预建（幂等，跨标的并行构建 cache/<symbol>.npz，--workers 控制并行数与内存峰值；
+# 其余入口也会按需自动构建）
 .venv/bin/python -m data_provider.cache
 
 # 预测算法：训练与 val/test 评估（幂等，参数或数据变化才重训）→ 产物在 forecast/runs/
