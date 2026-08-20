@@ -1,4 +1,4 @@
-"""模型：多模态市场编码器 + 标的 embedding + Branching Dueling Q-Network。
+"""模型：多模态市场编码器 + 标的 embedding + 分支 Q 网络。
 
   (a) 微观编码器：LOB 序列与私有状态序列各经一层 LSTM，取末隐状态拼接；
   (b) 宏观编码器：bar 级相对指标与窗口统计、LightGBM 预测向量经 MLP；
@@ -53,8 +53,8 @@ class MarketEncoder(nn.Module):
         return torch.cat([hb, hz, ea, self.symbol_emb(symbol)], dim=-1)
 
 
-class BDQNetwork(nn.Module):
-    """BDQ：共享状态价值 + 半宽 / 数量两支优势。"""
+class BranchQNetwork(nn.Module):
+    """分支 Q 网络：共享状态价值 + 半宽 / 数量两支优势。"""
 
     def __init__(self, cfg: Config):
         super().__init__()

@@ -54,8 +54,10 @@
     --select-edge: rgba(217, 89, 38, 0.7);
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 10px 24px rgba(0, 0, 0, 0.28);
   }
+  .rl-only { display: none !important; }
+  :root[data-strategy="rl"] .rl-only,
+  :root[data-algorithm="control"] .rl-only { display: inline-flex !important; }
   :root[data-algorithm="control"] .forecast-only { display: none !important; }
-  :root[data-algorithm="forecast"] .control-only { display: none !important; }
   :root[data-algorithm="control"] .workspace { grid-template-columns: 1fr; }
 
   * { box-sizing: border-box; }
@@ -233,8 +235,6 @@
       <p class="identity" id="identity">—</p>
     </div>
     <div class="controls">
-      <select id="algorithm" aria-label="选择算法"></select>
-      <span class="divider"></span>
       <select id="symbol" aria-label="选择标的"></select>
       <span class="divider"></span>
       <button id="prev-day" type="button" aria-label="前一交易日">←</button>
@@ -266,7 +266,7 @@
               <span><i class="key grid-center"></i>动态网格中心</span>
               <span><i class="key buy"></i>买入</span>
               <span><i class="key sell"></i>卖出</span>
-              <span class="control-only"><i class="key flatten"></i>平仓</span>
+              <span class="rl-only"><i class="key flatten"></i>平仓</span>
               <span class="forecast-only"><i class="key select"></i>选中窗口</span>
             </div>
             <div class="grid-tools">
@@ -290,7 +290,6 @@
             <div class="panel-title">单日门控对比</div>
             <div class="panel-sub" id="comparison-sub">点击方案卡片，在上图查看对应成交路径</div>
           </div>
-          <select id="gate" aria-label="选择门控指标"></select>
         </div>
         <div class="comparison-body" id="comparison-body"></div>
       </section>
@@ -323,8 +322,7 @@ const MINUTES_PER_DAY = 237;
 const CHART = { height: 430, top: 34, right: 20, bottom: 34, left: 62 };
 const X_TICKS = [[0, '09:30'], [30, '10:00'], [60, '10:30'], [90, '11:00'],
                  [120, '11:30 / 13:00'], [150, '13:30'], [180, '14:00'], [210, '14:30']];
-const ALGORITHM_NAMES = { forecast: '预测门控网格', control: '强化学习' };
-const GATE_NAMES = { residual: '残差趋势' };
+const PATTERN_NAME = '残差趋势模式';
 const RL_BAND_CAP = 0.05;  // 生效半宽超过中心价 5% 视为关闭档，不绘制也不参与取景
 const FILL_KIND = { immediate: '立即成交', flatten: '决策点平仓', liquidate: '日终清仓' };
 
@@ -341,13 +339,13 @@ const METRICS = [
   featureMetric('resid_abs_mean', '残差绝对均值', ' bp', 1e4, 2),
   featureMetric('resid_abs_q90', '残差九十分位', ' bp', 1e4, 2),
   featureMetric('abs_slope', '真实趋势位移', ' bp', 1e4, 2),
-  predictionMetric('abs_slope', '预测趋势位移', ' bp', 1e4, 2),
+  predictionMetric('probability', '不利模式概率', '%', 100, 1),
   featureMetric('er', '效率比', '%', 100, 1),
   featureMetric('rev_rate', '方向反转率', '%', 100, 1),
 ];
 
-const state = { index: null, day: null, algorithm: 'forecast', selected: 0,
-                gate: 'residual', strategy: 'none', gridStep: 0,
+const state = { index: null, day: null, algorithm: null, selected: 0,
+                strategy: 'none', gridStep: 0,
                 gridPlaying: false, gridTimer: null };
 const el = id => document.getElementById(id);
 const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
@@ -371,13 +369,13 @@ const signed = (value, digits) => (value >= 0 ? '+' : '−') + Math.abs(value).t
 const exposureText = value => value === 0 ? '0' : signed(value, 0);
 const STRATEGIES = [
   { key: 'none', name: '全天开启' },
-  { key: 'prediction', name: '预测值过滤' },
-  { key: 'oracle', name: '真实值过滤' },
+  { key: 'prediction', name: '识别概率过滤' },
+  { key: 'rl', name: '强化学习决策' },
 ];
 
 function currentGrid(day = state.day) {
-  if (!day?.grids) return null;
-  return state.strategy === 'none' ? day.grids.none : day.grids[state.gate]?.[state.strategy];
+  if (!day?.grids || state.strategy === 'rl') return null;
+  return day.grids[state.strategy];
 }
 
 function windowEnd(item) {
@@ -427,8 +425,8 @@ function buildScales(day, width) {
     low = Math.min(low, selected.lower);
     high = Math.max(high, selected.upper);
   }
-  if (state.algorithm === 'control') {
-    for (const decision of day.decisions || []) {
+  if (state.strategy === 'rl') {
+    for (const decision of day.rl?.decisions || []) {
       if (!rlBandVisible(decision)) continue;
       low = Math.min(low, decision.lower);
       high = Math.max(high, decision.upper);
@@ -570,7 +568,7 @@ function drawGridState(svg, day, scales, grid, count) {
 
 function drawRlBands(svg, day, scales, count) {
   if (!count) return;
-  const decisions = day.decisions;
+  const decisions = day.rl.decisions;
   const shown = decisions.slice(0, count);
   const lastX = day.x[day.x.length - 1];
   const visibleEnd = count < decisions.length ? decisions[count].x : lastX;
@@ -596,7 +594,7 @@ function drawRlBands(svg, day, scales, count) {
 }
 
 function drawRlMarks(svg, day, scales, count) {
-  const decisions = day.decisions;
+  const decisions = day.rl.decisions;
   const layer = node('g', {}, svg);
   // 决策点平仓（半宽档 0 不建网格）：菱形标记
   decisions.slice(0, count).forEach(item => {
@@ -612,7 +610,7 @@ function drawRlMarks(svg, day, scales, count) {
   });
   // 成交标记：只显示当前回放进度之前发生的
   const threshold = count < decisions.length ? decisions[count].t : Infinity;
-  for (const fill of day.fills) {
+  for (const fill of day.rl.fills) {
     if (fill.t >= threshold) break;
     const circle = node('circle', { cx: scales.x(fill.x), cy: scales.y(fill.price), r: 4.5,
                                     fill: fill.side === 'buy' ? 'var(--series-buy)' : 'var(--series-sell)',
@@ -649,8 +647,7 @@ function renderGrid(day) {
   const events = grid.events || [];
   state.gridStep = clamp(state.gridStep, 0, events.length);
   const strategy = STRATEGIES.find(item => item.key === state.strategy).name;
-  const gate = GATE_NAMES[state.gate] || state.gate;
-  el('grid-sub').innerHTML = `测试集 · ${strategy}${state.strategy === 'none' ? '' : ' · ' + gate} · ` +
+  el('grid-sub').innerHTML = `测试集 · ${strategy}${state.strategy === 'none' ? '' : ' · ' + PATTERN_NAME} · ` +
     `网格半宽 <span class="math">W<sub>d</sub></span> ${grid.width.toFixed(4)} · ` +
     `统一从 ${clockAt(day.t0)} 起回放`;
   const progress = el('grid-progress');
@@ -671,11 +668,12 @@ function renderGrid(day) {
 }
 
 function renderRlReplay(day) {
-  const decisions = day.decisions || [];
+  const decisions = day.rl?.decisions || [];
   state.gridStep = clamp(state.gridStep, 0, decisions.length);
-  const log = day.log || {};
-  el('grid-sub').textContent = `测试集 · 贪心回放 · 决策点 ${log.n_decisions ?? decisions.length} · ` +
-    `日内成交 ${log.n_fills} 笔 · 决策点平仓 ${log.n_flatten} 次`;
+  const log = day.rl?.log || {};
+  el('grid-sub').textContent = `测试集 · 强化学习决策（检查点 ${day.rl?.checkpoint || '—'}） · ` +
+    `决策点 ${log.n_decisions ?? decisions.length} · 日内成交 ${log.n_fills} 笔 · ` +
+    `决策点平仓 ${log.n_flatten} 次`;
   const progress = el('grid-progress');
   progress.max = decisions.length;
   progress.value = state.gridStep;
@@ -694,26 +692,21 @@ function renderRlReplay(day) {
 }
 
 function renderComparison(day) {
-  const gatePicker = el('gate');
   if (!day.grids) {
-    gatePicker.disabled = true;
-    el('comparison-sub').textContent = '当前日期不在样本外预测范围内';
-    el('comparison-body').innerHTML = '<div class="grid-empty">当前日期没有样本外预测，无法比较门控方案。</div>';
+    el('comparison-sub').textContent = '当前日期不在样本外识别范围内';
+    el('comparison-body').innerHTML = '<div class="grid-empty">当前日期没有样本外识别，无法比较门控方案。</div>';
     return;
   }
-  gatePicker.disabled = false;
-  const expressions = {
-    resid_abs_q90: 'q<sub>0.9</sub>(|ε|)/(W<sub>d</sub>/P<sub>0</sub>)',
-    abs_slope: '|s|/(W<sub>d</sub>/P<sub>0</sub>)',
-  };
-  const rule = state.index.params.gate_rules[state.gate].map(condition => {
-    const operator = condition.operator === '>' ? '&gt;' : '&lt;';
-    return `${expressions[condition.signal]} ${operator} ${condition.threshold}`;
-  }).join(' 且 ');
-  el('comparison-sub').innerHTML = `${state.index.params.model} 样本外预测 · ` +
+  const pattern = state.index.params.pattern;
+  const rule = `q<sub>0.9</sub>(|ε|)/(W<sub>d</sub>/P<sub>0</sub>) &lt; ${pattern.residual_ratio_threshold}` +
+    ` 且 |s|/(W<sub>d</sub>/P<sub>0</sub>) &gt; ${pattern.slope_ratio_threshold}` +
+    `（平滑标签）· P &gt; ${pattern.probability_threshold}`;
+  el('comparison-sub').innerHTML = `${state.index.params.model} 样本外识别 · ` +
     `<span class="math">${rule}</span> · 点击卡片查看成交路径`;
   el('comparison-body').innerHTML = STRATEGIES.map(strategy => {
-    const grid = strategy.key === 'none' ? day.grids.none : day.grids[state.gate][strategy.key];
+    // 强化学习卡片仅在同日导出了 control 数据时出现
+    const grid = strategy.key === 'rl' ? day.rl?.grid : day.grids[strategy.key];
+    if (!grid) return '';
     const share = grid.evaluated_minutes
       ? 100 * grid.gated_minutes / grid.evaluated_minutes : 0;
     const score = grid.score === null ? '—' : grid.score.toFixed(3);
@@ -721,6 +714,10 @@ function renderComparison(day) {
     const meanWidth = Number.isFinite(grid.width) ? grid.width.toFixed(3) : '—';
     const profitPerTrade = Number.isFinite(grid.profit_per_trade)
       ? grid.profit_per_trade.toFixed(3) : '—';
+    const exposure = strategy.key === 'rl' ? grid.exposure : grid.buys - grid.sells;
+    const foot = strategy.key === 'none' ? '不使用门控'
+      : strategy.key === 'rl' ? `网格停用 ${grid.gated_minutes} 分钟（${share.toFixed(1)}%）`
+      : `命中 ${grid.gated_minutes} 分钟（${share.toFixed(1)}%）`;
     return `<button class="strategy-card" type="button" data-strategy="${strategy.key}"
                     aria-pressed="${strategy.key === state.strategy}">
       <span class="strategy-head">
@@ -730,13 +727,12 @@ function renderComparison(day) {
       <span class="strategy-metrics">
         <span class="strategy-metric"><span>Score</span><b>${score}</b></span>
         <span class="strategy-metric"><span>成交</span><b>${grid.trades}</b></span>
-        <span class="strategy-metric"><span>日终敞口</span><b>${exposureText(grid.buys - grid.sells)}</b></span>
+        <span class="strategy-metric"><span>日终敞口</span><b>${exposureText(exposure)}</b></span>
         <span class="strategy-metric"><span>网格收益</span><b>${gridProfit}</b></span>
         <span class="strategy-metric"><span>平均半宽</span><b>${meanWidth}</b></span>
         <span class="strategy-metric"><span>收益 / 交易</span><b>${profitPerTrade}</b></span>
       </span>
-      <span class="strategy-foot">买入 ${grid.buys} · 卖出 ${grid.sells} · ` +
-        `${strategy.key === 'none' ? '不使用门控' : `命中 ${grid.gated_minutes} 分钟（${share.toFixed(1)}%）`}</span>
+      <span class="strategy-foot">买入 ${grid.buys} · 卖出 ${grid.sells} · ${foot}</span>
       <span class="gate-track"><span class="gate-fill" style="width:${share.toFixed(1)}%"></span></span>
     </button>`;
   }).join('');
@@ -908,7 +904,7 @@ function renderChart(day) {
   const scales = buildScales(day, width);
   const svg = node('svg', { viewBox: `0 0 ${width} ${CHART.height}`, width, height: CHART.height,
                             role: 'img', 'aria-label': '当日分时价格、选中窗口与网格路径' });
-  if (state.algorithm === 'control') {
+  if (state.algorithm === 'control' || (state.strategy === 'rl' && day.rl)) {
     drawRlBands(svg, day, scales, state.gridStep);
     drawAxes(svg, scales);
     drawPrice(svg, day, scales);
@@ -934,7 +930,11 @@ function renderPage() {
   }
   renderStrip(state.day);
   renderInspector(state.day);
-  renderGrid(state.day);
+  if (state.strategy === 'rl' && state.day.rl) {
+    renderRlReplay(state.day);
+  } else {
+    renderGrid(state.day);
+  }
   renderComparison(state.day);
   renderChart(state.day);
 }
@@ -946,7 +946,7 @@ function renderWindow() {
 }
 
 function renderReplay() {
-  if (state.algorithm === 'control') {
+  if (state.algorithm === 'control' || (state.strategy === 'rl' && state.day.rl)) {
     renderRlReplay(state.day);
   } else {
     renderGrid(state.day);
@@ -963,7 +963,8 @@ function selectWindow(position) {
 function selectStrategy(strategy) {
   stopGridPlayback();
   state.strategy = strategy;
-  state.gridStep = currentGrid()?.events?.length || 0;
+  document.documentElement.dataset.strategy = strategy;
+  state.gridStep = replaySteps().length;
   renderComparison(state.day);
   renderReplay();
 }
@@ -1010,7 +1011,24 @@ async function select(symbol, date) {
     return;
   }
   if (token !== selectionToken) return;
+  if (state.algorithm === 'control') {
+    day.rl = { decisions: day.decisions, fills: day.fills, log: day.log,
+               checkpoint: entry.checkpoint };
+  } else {
+    // 同日的 control 数据充当对比栏的第三张卡片及其回放路径，缺失时仅隐藏卡片
+    const controlEntry = (state.index.algorithms.control?.symbols || [])
+      .find(item => item.symbol === symbol);
+    if (controlEntry?.replay_dates?.includes(date)) {
+      try {
+        const rl = await fetchJson(`data/control/${symbol}/${date}.json`);
+        if (token !== selectionToken) return;
+        day.rl = { ...rl, checkpoint: controlEntry.checkpoint };
+      } catch {}
+    }
+  }
   state.day = day;
+  if (state.strategy === 'rl' && !day.rl) state.strategy = 'none';
+  document.documentElement.dataset.strategy = state.strategy;
   if (state.algorithm === 'control') {
     state.selected = 0;
     state.gridStep = day.decisions.length;
@@ -1018,7 +1036,7 @@ async function select(symbol, date) {
       `（检查点 ${entry.checkpoint || '—'}）`;
   } else {
     state.selected = Math.max(day.windows.findIndex(item => item.features), 0);
-    state.gridStep = currentGrid()?.events?.length || 0;
+    state.gridStep = replaySteps().length;
     el('window-step').textContent = windowStep();
     el('chart-sub').textContent = `横轴压缩午休；窗口长度 ${state.index.params.pred_ticks} tick，` +
       `步长 ${state.index.params.stride_ticks} tick，共 ${day.windows.length} 个窗口`;
@@ -1043,9 +1061,10 @@ function stepDate(offset) {
 }
 
 function replaySteps() {
-  return state.algorithm === 'control'
-    ? state.day?.decisions || []
-    : currentGrid()?.events || [];
+  if (state.algorithm === 'control' || state.strategy === 'rl') {
+    return state.day?.rl?.decisions || [];
+  }
+  return currentGrid()?.events || [];
 }
 
 async function main() {
@@ -1067,25 +1086,10 @@ async function main() {
     el('notice').textContent = 'data/index.json 没有任何算法的导出数据，请先运行 python -m webviz.export。';
     return;
   }
-  el('algorithm').innerHTML = algorithms
-    .map(key => `<option value="${key}">${ALGORITHM_NAMES[key] || key}</option>`).join('');
+  // 无算法选择器：有 forecast 数据即以 forecast 为主视图，control 数据并入对比栏第三张卡片
   state.algorithm = algorithms.includes('forecast') ? 'forecast' : algorithms[0];
-  el('algorithm').value = state.algorithm;
   document.documentElement.dataset.algorithm = state.algorithm;
 
-  // 门控选项由导出的 gate_rules 驱动，随 forecast.signals.GATES 自动同步
-  const gates = Object.keys(state.index.params?.gate_rules || {});
-  el('gate').innerHTML = gates
-    .map(key => `<option value="${key}">${GATE_NAMES[key] || key}门控</option>`).join('');
-  if (gates.length) {
-    state.gate = gates[0];
-    el('gate').value = state.gate;
-  }
-  el('algorithm').addEventListener('change', event => {
-    state.algorithm = event.target.value;
-    document.documentElement.dataset.algorithm = state.algorithm;
-    select(fillSymbols(), fillDates(el('symbol').value));
-  });
   el('symbol').addEventListener('change', event => {
     select(event.target.value, fillDates(event.target.value));
   });
@@ -1094,13 +1098,6 @@ async function main() {
   el('next-day').addEventListener('click', () => stepDate(1));
   el('prev-window').addEventListener('click', () => selectWindow(state.selected - 1));
   el('next-window').addEventListener('click', () => selectWindow(state.selected + 1));
-  el('gate').addEventListener('change', event => {
-    stopGridPlayback();
-    state.gate = event.target.value;
-    state.gridStep = currentGrid()?.events?.length || 0;
-    renderComparison(state.day);
-    renderReplay();
-  });
   el('grid-play').addEventListener('click', () => {
     const steps = replaySteps();
     if (!steps.length) return;

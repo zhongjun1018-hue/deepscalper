@@ -23,6 +23,7 @@ wandb/
 # 各子项目运行产出
 strategy/runs/
 forecast/runs/
+forecast/regime/runs/
 control/runs/
 webviz/data/
 

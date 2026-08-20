@@ -35,7 +35,7 @@ from data_provider.ticks import DayData, list_symbols, load_days
 from data_provider.windows import load_cache
 from strategy.metrics import financial_metrics
 
-from .agent import BDQAgent
+from .agent import BranchQAgent
 from .buffer import Transition
 from .config import Config
 from .env import DayMarket, TradingEnv, action_params
@@ -134,7 +134,7 @@ def evaluate(markets: list[DayMarket], policy) -> dict:
     return metrics
 
 
-def save_checkpoint(agent: BDQAgent, cfg: Config, path: str) -> None:
+def save_checkpoint(agent: BranchQAgent, cfg: Config, path: str) -> None:
     """保存（验证最优的）online 网络权重、配置与消融的固定档位，供回放重建同一贪心策略
     （加载见 control/trace.py）。"""
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -151,13 +151,13 @@ def train_agent(
     fixed_gears: tuple[int | None, int | None] = (None, None),
     log_prefix: str = "",
     tracker: Tracker | None = None,
-) -> tuple[BDQAgent, dict]:
-    """训练一个 BDQ 智能体，返回（验证最优智能体, 训练日志）。
+) -> tuple[BranchQAgent, dict]:
+    """训练一个分支 Q 智能体，返回（验证最优智能体, 训练日志）。
 
     markets / val_markets 需已挂载标准化统计量（见 fit_feature_stats）。
     """
     torch.set_num_threads(cfg.num_threads)
-    agent = BDQAgent(cfg, seed=seed, fixed_gears=fixed_gears)
+    agent = BranchQAgent(cfg, seed=seed, fixed_gears=fixed_gears)
 
     # 选模用验证集 SR：训练目标是风险调整后的（存货惩罚），以 TR 选模会系统性偏向高杠杆
     best_val_sr, best_state, history = -np.inf, None, []
@@ -273,7 +273,7 @@ def _result_path(cfg: Config, job: dict) -> str:
     for key, tag in (("hindsight_weight", "w"), ("inventory_lambda", "lam"), ("seed", "seed")):
         if job[key] is not None:
             parts.append(f"{tag}{job[key]:g}")
-    return os.path.join(cfg.result_dir, job["symbol"], "_".join(parts) + ".json")
+    return os.path.join(cfg.runs_dir, job["symbol"], "_".join(parts) + ".json")
 
 
 def save_result(path: str, payload: dict) -> None:

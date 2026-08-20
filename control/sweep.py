@@ -1,7 +1,7 @@
 """control 超参数一次一因子探索（python -m control.sweep）。
 
 以 Config 默认值为中心点，SWEEP_LADDERS 的每个参数沿梯子单独变动、其余保持默认，
-覆盖网络结构、优化、SMDP 口径（超时 K 与折扣 γ）、奖励塑形（w、λ）与目标网络、PER。
+覆盖网络结构、优化、SMDP 口径（超时 K 与折扣 γ）、奖励塑形（w、λ）与目标网络、优先级回放。
 方法固定为完整 GRID，切分、训练与选模协议与 control.train 一致；比较判据为验证集 SR，
 测试指标仅随表报告、不参与选值。一次一因子忽略参数间交互，定位是围绕默认配置的
 敏感性分析而非全局寻优；w、λ 的正式选参仍走 design 7.1 的梯子协议。
@@ -53,7 +53,7 @@ SWEEP_LADDERS: dict[str, tuple] = {
     # 奖励塑形（design 6.2 的偏好参数）
     "hindsight_weight": (0.05, 0.1, 0.2),
     "inventory_lambda": (1.0, 3.0, 10.0),
-    # 目标网络与 PER
+    # 目标网络与优先级回放
     "target_sync": (250, 500, 1000),
     "per_alpha": (0.4, 0.6, 0.8),
 }
@@ -73,7 +73,7 @@ def job_stem(job: dict) -> str:
 
 
 def _result_path(cfg: Config, job: dict) -> str:
-    return os.path.join(cfg.result_dir, "sweep", job["symbol"], job_stem(job) + ".json")
+    return os.path.join(cfg.runs_dir, "sweep", job["symbol"], job_stem(job) + ".json")
 
 
 def make_jobs(symbols: list[str], seeds: tuple[int, ...], params: list[str]) -> list[dict]:
@@ -235,7 +235,7 @@ def main() -> None:
             except Exception as exc:  # 单个作业失败不阻塞其它作业
                 print(f"FAIL {_result_path(cfg, futures[fut])}: {exc}", flush=True)
 
-    sweep_dir = os.path.join(cfg.result_dir, "sweep")
+    sweep_dir = os.path.join(cfg.runs_dir, "sweep")
     df = load_rows(sweep_dir)
     if df.empty:
         print(f"未找到探索结果：{sweep_dir}")

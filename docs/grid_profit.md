@@ -148,7 +148,7 @@ $$
 
 ## 七、去量纲形态评分
 
-为消除标的价格和格距的影响，形态评分（`strategy/engine.py` 的 `grid_profit`）不直接使用 $G$，而是以格距 $d$ 归一化；统一回测在此基础上扣除显性费用（design.md 8.4）：
+为消除标的价格和格距的影响，形态评分（`strategy/engine.py` 的 `grid_profit`）不直接使用 $G$，而是以格距 $d$ 归一化；统一回测在此基础上扣除显性费用（design.md 8.5）：
 
 $$
 \boxed{g=\frac{G}{d}=z\frac{y-x}{d}+\frac{1}{2}(K+z^2)}.

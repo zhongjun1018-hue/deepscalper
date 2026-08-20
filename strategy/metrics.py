@@ -49,25 +49,42 @@ def summarize(days: list[dict]) -> dict[str, float]:
     """逐日记录的统一汇总：费用后网格收益 g + 日均闭环率 / 成交次数 / 宽幅。
 
     days 元素为 {g, n_buys, n_sells, closure_rate, width_rel}。g 以当日基准
-    格距 W_d 归一（design 8.4）；width_rel 为当日时间加权生效半宽 / 前收，
+    格距 W_d 归一（design 8.4）；width_rel 为当日时间加权生效半宽 / 当日开盘价，
     无网格触发时间的日记 NaN。NaN 字段的矩均按有值日计。
+
+    闭环率与买卖笔数各报两个口径（design 8.5）：mean_* 为逐日等权均值（分母含
+    零交易日）；weighted_* 按当日成交笔数加权（零交易日权重为 0，分母自然剔除），
+    其中加权闭环率即全期汇总买卖笔数的直接配对，无成交时记 NaN。
     """
     if not days:
         return {"n_days": 0, "mean_g": float("nan"), "std_g": float("nan"),
                 "mean_closure_rate": float("nan"), "mean_trades": float("nan"),
                 "mean_buys": float("nan"), "mean_sells": float("nan"),
+                "weighted_closure_rate": float("nan"), "weighted_trades": float("nan"),
+                "weighted_buys": float("nan"), "weighted_sells": float("nan"),
                 "mean_width_rel": float("nan")}
     buys = np.array([d["n_buys"] for d in days], dtype=np.float64)
     sells = np.array([d["n_sells"] for d in days], dtype=np.float64)
+    trades = buys + sells
+    total = trades.sum()
     mean_g, std_g = _nan_moments(np.array([d["g"] for d in days], dtype=np.float64))
+
+    def weighted(values: np.ndarray) -> float:
+        return float(trades @ values / total) if total else float("nan")
+
     return {
         "n_days": len(days),
         "mean_g": mean_g,
         "std_g": std_g,
         "mean_closure_rate": float(np.mean([d["closure_rate"] for d in days])),
-        "mean_trades": float((buys + sells).mean()),
+        "mean_trades": float(trades.mean()),
         "mean_buys": float(buys.mean()),
         "mean_sells": float(sells.mean()),
+        "weighted_closure_rate": (closure_rate(int(buys.sum()), int(sells.sum()))
+                                  if total else float("nan")),
+        "weighted_trades": weighted(trades),
+        "weighted_buys": weighted(buys),
+        "weighted_sells": weighted(sells),
         "mean_width_rel": _nan_moments(
             np.array([d["width_rel"] for d in days], dtype=np.float64))[0],
     }

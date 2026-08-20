@@ -1,11 +1,11 @@
-"""LightGBM 前瞻预测的训练与预测产线（预测算法的唯一训练入口）。
+"""LightGBM 前瞻回归的训练与预测产线（RL 状态特征的数据源）。
 
-各标的缓存按 data_provider.split.chronological_split 逐标的单次 7:1:2 时序切分，
+各标的缓存按 data_provider.split.chronological_split 逐标的单次时序切分，
 训练集跨标的池化 fit、验证集早停；训练与评估只取每 stride_ticks 一行（相邻 tick 的
 回看窗口重叠 599/600），推理则覆盖全部 tick 并回写统一缓存 cache/<symbol>.npz 的
-preds 块（控制器状态与门控回测的数据源），最后在 val/test 上评估写 runs_dir/metrics.json。
-ensure_predictions 为幂等预建入口，供 strategy/backtest.py 在回测前调用；RL 训练
-（control.train）只读预测缓存、不在此重训。
+preds 块（控制器状态特征，5.4），最后在 val/test 上评估写 runs_dir/metrics.json。
+ensure_predictions 为幂等预建入口，strategy/backtest.py 在回放前无条件调用；
+RL 训练（control.train）只读预测缓存、不在此重训。
 """
 
 from __future__ import annotations

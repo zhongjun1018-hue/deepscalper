@@ -1,19 +1,21 @@
-"""webviz 数据导出：forecast（预测门控网格）与 control（强化学习）两个算法的逐日决策回放。
+"""webviz 数据导出：forecast（模式门控网格）与 control（强化学习）在同一页面的逐日决策回放。
 
 导出布局（index.html 通过 fetch 读取，需 `python -m http.server` 伺服）：
-  webviz/data/forecast/<symbol>/<date>.json   逐日价格曲线、滑动窗口统计、各 门控×scheme 网格回放
-  webviz/data/control/<symbol>/<date>.json    逐日 mid 曲线、贪心决策点（生效网格）与成交标记
-  webviz/data/index.json                        两算法可用的 (symbol, date) 目录与展示参数
+  webviz/data/forecast/<symbol>/<date>.json   逐日价格曲线、滑动窗口统计、常开与识别门控网格回放
+  webviz/data/control/<symbol>/<date>.json    贪心决策点（生效网格）、成交标记与单日摘要
+  webviz/data/index.json                        两侧可用的 (symbol, date) 目录与展示参数
 
-forecast 数据源：报价 data_provider.ticks.load_days；窗口统计、目标、预测与逐日半宽
-统一取自 data_provider.windows.load_cache（另用 path_stats 复算展示统计）；门控掩码
-forecast.signals.build_gate_masks；网格事件 strategy.engine.run_day(trace=True)
-（门控只在净持仓为 0 时生效）。网格回放只覆盖 7:1:2 切分的测试段（样本外），其余日期
-仅导出价格与窗口。
+页面以 forecast 目录为主索引，同日的 control 数据充当单日对比栏的第三张卡片
+（强化学习决策）及其回放路径。forecast 数据源：报价 data_provider.ticks.load_days
+（另用 path_stats 复算展示统计）；窗口统计、半宽与切分统一取自 forecast.regime.data
+的 bank；门控为识别概率 > τ（prediction），识别器缺失或过期时经 ensure_classifier
+先重训；网格事件 strategy.engine.run_day(trace=True)（门控只在净持仓为 0 时生效）。
+网格回放只覆盖测试段（样本外），其余日期仅导出价格与窗口。
 
 control 数据源：control.trace.load_checkpoint 重建网络、Config 与消融的固定档位，
 greedy_policy 构建贪心策略，prepare_test_markets 构建测试段市场（训练段拟合标准化
-统计量）；逐测试日 control.trace.trace_day 贪心回放。
+统计量）；逐测试日 control.trace.trace_day 贪心回放，单日摘要与门控卡片同指标口径
+（g = 超额收益 × B / W_d，与 strategy.backtest 的 agent 模式一致）。
 """
 
 from __future__ import annotations
@@ -24,16 +26,35 @@ import os
 
 import numpy as np
 
-from data_provider.split import chronological_split
 from data_provider.ticks import list_symbols, load_days, minute_index, minute_labels
-from data_provider.windows import TARGET_NAMES, load_cache, path_stats
-from forecast.config import Config as ForecastConfig
-from forecast.signals import GATES, GATE_RULES, SCHEMES, build_gate_masks
+from data_provider.windows import path_stats
+from forecast.regime.classify import day_prob
+from forecast.regime.config import RegimeConfig
+from forecast.regime.data import load_bank
+from forecast.regime.train import ensure_classifier
 from strategy import engine, metrics
+from strategy.grid import half_width
 
 DISPLAY_PATH_NAMES = ["rv", "path_len", "range_rel", "resid_abs_mean", "resid_abs_q90",
                       "abs_slope", "er", "rev_rate"]
-SLOPE_TARGET_INDEX = TARGET_NAMES.index("abs_slope")
+
+# 标的代码 → 证券简称（行情源无名称字段，展示层按代码查表，未知标的回退代码）
+SYMBOL_NAMES = {
+    "000096": "广聚能源", "000560": "我爱我家", "000566": "海南海药",
+    "002111": "威海广泰", "002134": "天津普林", "002370": "亚太药业",
+    "002387": "维信诺", "002673": "西部证券", "300497": "富祥股份",
+    "300765": "石药创新", "301308": "江波龙", "600571": "信雅达",
+    "600712": "南宁百货", "600835": "上海机电", "600847": "万里股份",
+    "600996": "贵广网络", "601288": "农业银行", "603897": "长城科技",
+    "688030": "山石网科", "688061": "灿瑞科技", "688592": "司南导航",
+    "688772": "珠海冠宇",
+}
+
+
+def symbol_entry(symbol: str, dates: list, replay_dates: list, **extra) -> dict:
+    """index.json 的标的条目：名称查 SYMBOL_NAMES，未知标的回退代码。"""
+    return {"symbol": symbol, "name": SYMBOL_NAMES.get(symbol, symbol),
+            "dates": dates, "replay_dates": replay_dates, **extra}
 
 
 def day_table(day) -> dict:
@@ -55,13 +76,6 @@ def day_table(day) -> dict:
     }
 
 
-def tick_anchors(mid: np.ndarray, n_ticks: int) -> np.ndarray:
-    """逐 tick 锚点 mid（门控相对宽度 w = 半宽/锚点 的分母）；本日之外的尾部记 NaN。"""
-    anchors = np.full(n_ticks, np.nan)
-    anchors[:len(mid)] = mid
-    return anchors
-
-
 def path_slope(path) -> float:
     """带符号的 OLS 斜率（每快照）；path_stats 的 abs_slope 只保留绝对值。"""
     position = np.arange(len(path), dtype=np.float64)
@@ -74,11 +88,11 @@ def finite(value, digits):
     return round(float(value), digits) if np.isfinite(value) else None
 
 
-def build_windows(table: dict, preds: np.ndarray, width: float | None,
-                  cfg: ForecastConfig) -> list:
-    """滑动窗口展示负载：趋势拟合、网格上下界、前瞻路径的实测统计与预测趋势位移。
+def build_windows(table: dict, prob: np.ndarray, width: float | None,
+                  cfg: RegimeConfig) -> list:
+    """滑动窗口展示负载：趋势拟合、网格上下界、前瞻路径的实测统计与识别概率。
 
-    按门控的决策间隔取样：锚点 tick 的前瞻路径为 (t, t+H]，第 t 行预测覆盖同一区间。
+    按门控的决策间隔取样：锚点 tick 的前瞻路径为 (t, t+H]，第 t 拍概率覆盖同一区间。
     """
     log_mid = np.log(table["mid"])
     minute = table["minute"]
@@ -110,10 +124,8 @@ def build_windows(table: dict, preds: np.ndarray, width: float | None,
             stats = path_stats(path)
             window["features"] = {name: finite(stats[name][0], 8)
                                   for name in DISPLAY_PATH_NAMES}
-        if np.isfinite(preds[anchor, SLOPE_TARGET_INDEX]):
-            window["prediction"] = {
-                "abs_slope": round(float(preds[anchor, SLOPE_TARGET_INDEX]), 8),
-            }
+        if np.isfinite(prob[anchor]):
+            window["prediction"] = {"probability": round(float(prob[anchor]), 4)}
         windows.append(window)
     return windows
 
@@ -185,36 +197,25 @@ def write_json(path: str, payload: dict) -> None:
         json.dump(payload, file, separators=(",", ":"))
 
 
-def export_forecast_symbol(symbol: str, args, cfg: ForecastConfig) -> dict:
+def export_forecast_symbol(symbol: str, args, cfg: RegimeConfig, classifier,
+                           threshold: float, symbol_id: int) -> dict:
     """导出一个标的的 forecast 算法回放数据，返回 index.json 的符号条目。"""
-    cache = load_cache(symbol, data_dir=args.data_dir, cache_dir=args.cache_dir,
-                       spec=cfg.window, zero_nan=False)
-    dates = cache["dates"]
-
+    bank = load_bank(symbol, cfg)
     days = {d.date: d for d in load_days(symbol, data_dir=args.data_dir)}
-    tables = {date: day_table(days[date]) for date in dates}
+    tables = {date: day_table(days[date]) for date in bank.dates}
     del days
 
-    # 门控掩码只在测试段（样本外）且半宽有效的交易日上构建
-    test = set(chronological_split(list(dates)).test)
-    candidates = [i for i, date in enumerate(dates)
-                  if date in test and np.isfinite(cache["width"][i])]
-    n_ticks = cache["targets"].shape[1]
-    masks, _ = build_gate_masks(
-        {"oracle": cache["targets"][candidates],
-         "prediction": cache["preds"][candidates]},
-        dates[candidates], cache["width"][candidates],
-        np.stack([tick_anchors(tables[dates[i]]["mid"], n_ticks) for i in candidates]))
-    candidate_set = set(candidates)
-
+    # 网格回放只在测试段（样本外）且标签可判定的交易日上构建
+    candidate_set = set(bank.day_indices("test"))
     out_dir = os.path.join(args.out_dir, "forecast", symbol)
     os.makedirs(out_dir, exist_ok=True)
     replay_dates = []
-    for i, date in enumerate(dates):
+    for i, date in enumerate(bank.dates):
         table = tables[date]
-        width = float(cache["width"][i])
+        width = float(bank.width[i])
         if not np.isfinite(width):
             width = None
+        prob = day_prob(classifier, bank, i, symbol_id, cfg)
         payload = {
             "symbol": symbol,
             "date": str(date),
@@ -223,30 +224,53 @@ def export_forecast_symbol(symbol: str, args, cfg: ForecastConfig) -> dict:
             "preclose": round(float(table["preclose"]), 4),
             "x": [round(float(v), 3) for v in table["x"]],
             "price": [round(float(v), 4) for v in table["lastpx"]],
-            "windows": build_windows(table, cache["preds"][i], width, cfg),
+            "windows": build_windows(table, prob, width, cfg),
         }
-        if i in candidate_set and width is not None:
-            # 有可判定预测的交易日才回放（oracle 真值与预测值同一行集），
-            # 统一自可预测起点（回看窗满的 lookback_ticks）起
-            usable = (np.isfinite(cache["targets"][i]).all(axis=1)
-                      & np.isfinite(cache["preds"][i]).any(axis=1))
-            if usable.any():
-                t0 = cfg.window.lookback_ticks
-                grids = {"none": build_grid(table, width, t0, None, cfg.stride_ticks)}
-                for gate in GATES:
-                    grids[gate] = {
-                        scheme: build_grid(table, width, t0,
-                                           masks.get((gate, scheme, date)),
-                                           cfg.stride_ticks)
-                        for scheme in SCHEMES[1:]
-                    }
-                if grids["none"] is not None:
-                    payload["t0"] = int(table["minute"][t0])
-                    payload["grids"] = grids
-                    replay_dates.append(str(date))
+        if i in candidate_set:
+            # 统一自可预测起点（回看窗满的 lookback_ticks）起回放
+            t0 = cfg.window.lookback_ticks
+            with np.errstate(invalid="ignore"):
+                mask = prob > threshold
+            grids = {"none": build_grid(table, width, t0, None, cfg.stride_ticks),
+                     "prediction": build_grid(table, width, t0, mask,
+                                              cfg.stride_ticks)}
+            if grids["none"] is not None:
+                payload["t0"] = int(table["minute"][t0])
+                payload["grids"] = grids
+                replay_dates.append(str(date))
         write_json(os.path.join(out_dir, f"{date}.json"), payload)
-    return {"symbol": symbol, "name": symbol,
-            "dates": [str(date) for date in dates], "replay_dates": replay_dates}
+    return symbol_entry(symbol, [str(date) for date in bank.dates], replay_dates)
+
+
+def day_summary(result: dict, market, cfg, table: dict) -> dict:
+    """trace_day 结果的单日摘要，与 build_grid 的卡片指标同构（单日对比栏的 RL 卡片）。
+
+    g 与 strategy.backtest 的 agent 模式同口径（超额收益 × B / W_d）；「平均半宽」为
+    时间加权生效半宽；gated_minutes 记网格停用时长（平仓档 0 与关闭档，对应门控卡片
+    的命中时长）。
+    """
+    log = result["log"]
+    base_width = half_width(cfg.window.atr_mult, market.atr, market.pre_close,
+                            cfg.window.min_width_ratio)
+    g = result["ret"] * market.base_value / base_width
+    trades = log["n_fills"]
+    exposure = sum(f["qty"] if f["side"] == "buy" else -f["qty"]
+                   for f in result["fills"] if f["kind"] != "liquidate")
+    idle_share = sum(share for gear, share in zip(cfg.widths, log["width_time"])
+                     if gear in (0.0, cfg.widths[-1]))
+    evaluated = float(table["x"][-1] - table["x"][market.start])
+    return {
+        "width": finite(log["width_rel"] * market.open_px, 4),
+        "buys": log["n_buys"],
+        "sells": log["n_sells"],
+        "trades": trades,
+        "score": round(log["closure_rate"], 6) if trades else None,
+        "exposure": round(float(exposure), 2),
+        "grid_profit": round(float(g), 6),
+        "profit_per_trade": round(float(g) / trades, 6) if trades else None,
+        "gated_minutes": int(round(idle_share * evaluated)),
+        "evaluated_minutes": int(round(evaluated)),
+    }
 
 
 def export_control_symbol(symbol: str, args, parser) -> dict:
@@ -301,15 +325,16 @@ def export_control_symbol(symbol: str, args, parser) -> dict:
             "price": [round(float(v), 4) for v in market.mid],
             "decisions": decisions,
             "fills": fills,
+            "grid": day_summary(result, market, cfg, table),
             "log": result["log"],
         })
         exported.append(market.date)
-    return {"symbol": symbol, "name": symbol, "dates": exported,
-            "replay_dates": exported, "checkpoint": os.path.basename(path)}
+    return symbol_entry(symbol, exported, exported,
+                        checkpoint=os.path.basename(path))
 
 
-def forecast_params(cfg: ForecastConfig) -> dict:
-    """index.json 的展示参数（forecast 语义：tick 口径窗口参数、门控规则、宽度参数）。"""
+def forecast_params(cfg: RegimeConfig, threshold: float) -> dict:
+    """index.json 的展示参数（forecast 语义：tick 口径窗口参数、模式与门控参数）。"""
     return {
         "model": "LightGBM",
         "lookback_ticks": cfg.window.lookback_ticks,
@@ -318,10 +343,12 @@ def forecast_params(cfg: ForecastConfig) -> dict:
         "atr_mult": cfg.window.atr_mult,
         "atr_window": cfg.window.atr_window,
         "min_width_ratio": cfg.window.min_width_ratio,
-        "gate_rules": {
-            gate: [{"signal": signal, "operator": operator, "threshold": threshold}
-                   for signal, operator, threshold in GATE_RULES[gate]]
-            for gate in GATES
+        "pattern": {
+            "residual_ratio_threshold": cfg.residual_ratio_threshold,
+            "slope_ratio_threshold": cfg.slope_ratio_threshold,
+            "sticky_stay": cfg.sticky_stay,
+            "emission_noise": cfg.emission_noise,
+            "probability_threshold": round(threshold, 4),
         },
     }
 
@@ -361,11 +388,18 @@ def main() -> None:
                         help="control：存货惩罚 λ（缺省取 control Config 默认值）")
     args = parser.parse_args()
 
-    symbols = args.symbols or list_symbols(args.data_dir)
+    symbols = sorted(args.symbols or list_symbols(args.data_dir))
     if args.algorithm == "forecast":
-        cfg = ForecastConfig(data_dir=args.data_dir, cache_dir=args.cache_dir)
-        entries = [export_forecast_symbol(symbol, args, cfg) for symbol in symbols]
-        update_index(args.out_dir, "forecast", entries, forecast_params(cfg))
+        # 识别器身份取 data 目录全部标的（symbol_id 与训练映射一致），--symbols 只选导出子集
+        model_symbols = sorted(list_symbols(args.data_dir))
+        cfg = RegimeConfig(data_dir=args.data_dir, cache_dir=args.cache_dir,
+                           symbols=tuple(model_symbols))
+        classifier, threshold = ensure_classifier(model_symbols, cfg)
+        entries = [export_forecast_symbol(symbol, args, cfg, classifier, threshold,
+                                          model_symbols.index(symbol))
+                   for symbol in symbols]
+        update_index(args.out_dir, "forecast", entries,
+                     forecast_params(cfg, threshold))
     else:
         entries = [export_control_symbol(symbol, args, parser) for symbol in symbols]
         update_index(args.out_dir, "control", entries)

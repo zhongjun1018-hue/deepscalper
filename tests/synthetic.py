@@ -30,4 +30,4 @@ def synthetic_day(date: str = "20260102", n: int = 650) -> DayData:
         frame[f"Sell{level}OrderQty"] = 1000.0
         frame[f"Buy{level}NumOrders"] = 10.0
         frame[f"Sell{level}NumOrders"] = 10.0
-    return DayData(date=date, frame=frame, pre_close=10.0, atr=0.05)
+    return DayData(date=date, frame=frame, pre_close=10.0, open_px=10.0, atr=0.05)

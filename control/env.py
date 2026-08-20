@@ -3,9 +3,10 @@
 design.md 第 3–7 节的实现：
   - 动作 (h, q) 给出对称的两条触发线与每笔成交手数，向前扫描至触发或超时，
     区间时长 τ 由市场决定；
-  - h = 0 时在决策点扫单平回底仓（3.5），h 极大（关闭档）则网格无法触发，
-    超时机制保证两者都不会形成吸收态；
-  - 决策点为「成交 / 超时 K tick / 日终」三者先到（4.1），中心只在网格成交时重置（3.5）；
+  - h = 0 时在决策点按对手方一档价平回底仓（3.5，仅净持仓非零时可选），
+    h 极大（关闭档）则网格无法触发，超时机制保证关闭档不会形成吸收态；
+  - 决策点为「成交 / 超时 K tick / 日终」三者先到（4.1）；每笔成交后中心重置为
+    成交价，超时未成交则重置为当拍中间价（3.5）；
   - 被动单以对手方一档严格穿越边界为成交条件，成交价为取整后的边界价（3.2）；
   - 奖励扣除底仓的被动收益，训练奖励另加 hindsight bonus 与存货惩罚（6.1–6.2）。
 
@@ -52,6 +53,7 @@ class Observation:
     private: np.ndarray     # (micro_steps, PRIVATE_DIM)
     macro: np.ndarray       # (MACRO_DIM,)
     symbol_id: int = 0      # 标的在 cfg.symbols 中的索引（网络端 embedding）
+    flatten_allowed: bool = True   # 平仓档是否可选：净持仓（pos − Q0）非零（design 5.1）
 
 
 class DayMarket:
@@ -69,14 +71,13 @@ class DayMarket:
         self.date = day.date
         self.atr = day.atr
         self.pre_close = day.pre_close
-        self.bid_p = f[[f"Buy{i}Price" for i in range(1, 11)]].to_numpy(np.float64)
-        self.ask_p = f[[f"Sell{i}Price" for i in range(1, 11)]].to_numpy(np.float64)
-        bid_q = f[[f"Buy{i}OrderQty" for i in range(1, 11)]].to_numpy(np.float64)
-        ask_q = f[[f"Sell{i}OrderQty" for i in range(1, 11)]].to_numpy(np.float64)
-        # 挂单量由股折算为手；缺档（价格为 0）的深度记 0，使其不参与撮合
-        self.bid_q = np.where(self.bid_p > 0, bid_q, 0.0) / cfg.lot_size
-        self.ask_q = np.where(self.ask_p > 0, ask_q, 0.0) / cfg.lot_size
-        self.mid = (self.bid_p[:, 0] + self.ask_p[:, 0]) / 2.0
+        self.open_px = day.open_px
+        self.bid1 = f["Buy1Price"].to_numpy(np.float64)
+        self.ask1 = f["Sell1Price"].to_numpy(np.float64)
+        # 一档挂单量由股折算为手，供 liquidity_ratio 监控成交规模（design 3.2）
+        self.bid1_lots = f["Buy1OrderQty"].to_numpy(np.float64) / cfg.lot_size
+        self.ask1_lots = f["Sell1OrderQty"].to_numpy(np.float64) / cfg.lot_size
+        self.mid = (self.bid1 + self.ask1) / 2.0
         tvt = f["TotalVolumeTrade"].to_numpy(np.float64)
         self.vol_delta = np.maximum(np.diff(tvt, prepend=tvt[0]), 0.0)
         self.micro = build_micro_matrix(f)
@@ -86,7 +87,7 @@ class DayMarket:
         # 参与扫描的快照：盘口未交叉，且累计成交笔数刷新历史高点。
         # fmax 累积使计数缺失或回退的快照不判成交，也不改变比较基准。
         num_trades = f["NumTrades"].to_numpy(np.float64)
-        self.valid_book = self.bid_p[:, 0] <= self.ask_p[:, 0]
+        self.valid_book = self.bid1 <= self.ask1
         self.scannable = np.empty(self.n, dtype=bool)
         self.scannable[0] = False
         self.scannable[1:] = (
@@ -180,6 +181,7 @@ class DayMarket:
             private=private,
             macro=self.macro_at(t),
             symbol_id=self.symbol_id,
+            flatten_allowed=bool(priv_hist[-1, PRIV_POS] != cfg.base_position),
         )
 
     def trade(self, t: int, qty: float, price: float) -> tuple[float, float, float]:
@@ -192,23 +194,6 @@ class DayMarket:
         notional = abs(qty) * price
         fee_cost = fee(side, notional)
         return -side * notional - fee_cost, fee_cost, side * (notional - abs(qty) * self.mid[t])
-
-    def sweep(self, t: int, qty: float) -> tuple[float, float]:
-        """平仓扫单的逐档定价：返回（带符号成交手数, 逐档成交均价）。
-
-        买单依次吃卖 1..10 档、卖单依次吃买 1..10 档，各档成交量受该档挂单量限制，
-        深度不足时部分成交（全无深度时返回零手）。记账仍走 trade。
-        """
-        if qty > 0:
-            prices, depths = self.ask_p[t], self.ask_q[t]
-        else:
-            prices, depths = self.bid_p[t], self.bid_q[t]
-        # 逐档分配：第 k 档只承接前 k-1 档吃完后剩余的委托量
-        take = np.clip(abs(qty) - np.concatenate(([0.0], np.cumsum(depths)[:-1])), 0.0, depths)
-        filled, notional = float(take.sum()), float(take @ prices)
-        if filled <= 0.0:
-            return 0.0, float("nan")
-        return math.copysign(filled, qty), notional / filled
 
     def hindsight_price(self, t: int) -> float:
         return self.mid[future_price_index(t, self.cfg.hindsight_ticks, self.n)]
@@ -235,7 +220,7 @@ class Fill:
     liquidity: float    # 成交快照的对手一档深度（手）
     center_move: float  # 成交价相对上一中心的移动距离（bp）
     kind: str           # "grid" 区间末触发 / "immediate" 决策点立即成交 /
-                        # "flatten" 决策点平仓扫单 / "liquidate" 日终清仓扫单（3.5）
+                        # "flatten" 决策点平仓 / "liquidate" 日终清仓（3.5）
 
 
 @dataclass
@@ -329,11 +314,14 @@ class TradingEnv:
         return lots
 
     def _execute(self, t: int, qty: float, price: float, kind: str) -> float:
-        """按给定价格成交 qty 手、登记成交并记账，返回交易成本。"""
+        """按给定价格成交 qty 手、登记成交并记账，返回交易成本。
+
+        成交后中心重置到成交价（3.5），下一决策以该价为网格中心。
+        """
         cash_delta, fee_cost, execution = self.market.trade(t, qty, price)
         self.fee_cost += fee_cost
         self.execution_cost += execution
-        liquidity = (self.market.ask_q if qty > 0 else self.market.bid_q)[t, 0]
+        liquidity = (self.market.ask1_lots if qty > 0 else self.market.bid1_lots)[t]
         self.fills.append(
             Fill(tick=t, qty=qty, price=price, liquidity=float(liquidity),
                  center_move=abs(price - self.center) / self.center * 1e4,
@@ -341,28 +329,23 @@ class TradingEnv:
         )
         self.pos += qty
         self.cash += cash_delta
-        return fee_cost + execution
-
-    def _grid_fill(self, t: int, qty: float, price: float, kind: str) -> float:
-        """网格成交一笔：中心重置到成交价（3.5）。"""
-        cost = self._execute(t, qty, price, kind)
         self.center = price
         self.last_fill_tick = t
-        return cost
+        return fee_cost + execution
 
     def _immediate_fill(self, t: int, sell: float, buy: float, size: int) -> float:
         """新带宽已把现价甩在带外时，在决策点处按对手价立即成交一笔（3.5）。"""
         if not self.market.valid_book[t]:
             return 0.0
-        bid, ask = self.market.bid_p[t, 0], self.market.ask_p[t, 0]
+        bid, ask = self.market.bid1[t], self.market.ask1[t]
         if sell_crossed(bid, sell):
             lots = self._sell_lots(size)
             if lots > 0.0:
-                return self._grid_fill(t, -lots, bid, "immediate")
+                return self._execute(t, -lots, bid, "immediate")
         elif buy_crossed(ask, buy):
             lots = self._buy_lots(size, ask)
             if lots > 0.0:
-                return self._grid_fill(t, lots, ask, "immediate")
+                return self._execute(t, lots, ask, "immediate")
         return 0.0
 
     def _scan(self, t: int, sell: float | None, buy: float | None) -> tuple[int, int]:
@@ -375,26 +358,23 @@ class TradingEnv:
         window = slice(t + 1, end + 1)
         hit = np.zeros(end - t, dtype=bool)
         if sell is not None:
-            hit |= sell_crossed(m.bid_p[window, 0], sell)
+            hit |= sell_crossed(m.bid1[window], sell)
         if buy is not None:
-            hit |= buy_crossed(m.ask_p[window, 0], buy)
+            hit |= buy_crossed(m.ask1[window], buy)
         hit &= m.scannable[window]
         if not hit.any():
             return end, 0
         u = t + 1 + int(np.argmax(hit))
-        return u, -1 if sell is not None and sell_crossed(m.bid_p[u, 0], sell) else 1
+        return u, -1 if sell is not None and sell_crossed(m.bid1[u], sell) else 1
 
-    def _sweep_to_base(self, t: int, kind: str) -> float:
-        """扫十档盘口把超额敞口平回底仓，返回交易成本（3.5：h=0 平仓与日终共用此路径）。
-
-        深度不足的残余留待后续决策点或日终，日终仍有残余则按中间价估值；平仓不重置
-        网格中心，中心只在网格成交时移动。
-        """
+    def _flatten_to_base(self, t: int, kind: str) -> float:
+        """按对手方一档价把超额敞口一笔平回底仓，返回交易成本（3.5：h=0 平仓与日终清仓
+        共用此路径）。不模拟逐档穿价撮合，成交量不受一档深度限制。"""
         excess = self.pos - self.cfg.base_position
         if excess == 0.0:
             return 0.0
-        filled, price = self.market.sweep(t, -excess)
-        return self._execute(t, filled, price, kind) if filled else 0.0
+        price = (self.market.bid1 if excess > 0 else self.market.ask1)[t]
+        return self._execute(t, -excess, price, kind)
 
     # ---- SMDP 步进 ----
     def step(self, params: GridParams) -> StepResult:
@@ -410,7 +390,7 @@ class TradingEnv:
         sell = buy = None
         cost = 0.0
         if width == 0.0:
-            cost += self._sweep_to_base(t, "flatten")
+            cost += self._flatten_to_base(t, "flatten")
             size = 0                       # 平仓档不建网格，生效数量记 0
         else:
             sell, buy = self._lines(width)
@@ -428,12 +408,14 @@ class TradingEnv:
         self._write_priv(t + 1, t_next, width, size)  # 区间内恒定的私有状态
 
         if side < 0:
-            cost += self._grid_fill(t_next, -sell_lots, sell, "grid")
+            cost += self._execute(t_next, -sell_lots, sell, "grid")
         elif side > 0:
-            cost += self._grid_fill(t_next, buy_lots, buy, "grid")
+            cost += self._execute(t_next, buy_lots, buy, "grid")
+        else:
+            self.center = m.mid[t_next]   # 连续 K tick 未成交：中心改用当拍中间价（3.5）
         done = t_next >= m.n - 1
         if done:
-            cost += self._sweep_to_base(t_next, "liquidate")
+            cost += self._flatten_to_base(t_next, "liquidate")
         self._write_priv(t_next, t_next, width, size)  # 区间末成交后的状态
 
         excess = pos_held - cfg.base_position
@@ -475,7 +457,7 @@ class TradingEnv:
         return 1.0 + (equity - m.equity0 - q0 * (p_end - m.p0)) / m.base_value
 
     def _width_rel(self, tau: np.ndarray, chosen_width: np.ndarray) -> float:
-        """当日时间加权生效半宽 / 前收：只计网格可触发的区间（平仓 0 与关闭档除外）。
+        """当日时间加权生效半宽 / 当日开盘价：只计网格可触发的区间（平仓 0 与关闭档除外）。
 
         无可触发时间的日记 NaN，由汇总侧按有值日取均值。
         """
@@ -485,13 +467,13 @@ class TradingEnv:
             return float("nan")
         hw = np.array([half_width(w, m.atr, m.pre_close, cfg.window.min_width_ratio)
                        for w in chosen_width[active]])
-        return float(tau[active] @ hw / (tau[active].sum() * m.pre_close))
+        return float(tau[active] @ hw / (tau[active].sum() * m.open_px))
 
     def episode_log(self) -> dict:
         """当日补充指标（design 7.4）与选参所需的敞口负载（7.1）。
 
-        成交口径为日内主动成交（网格触发、决策点立即成交与决策点平仓扫单）；日终清仓
-        是被动收尾，只报告其手数。中心移动只对网格成交有意义，平仓扫单不计入。
+        成交口径为日内主动成交（网格触发、决策点立即成交与决策点平仓）；日终清仓
+        是被动收尾，只报告其手数。每笔成交都重置中心，中心移动对全部日内成交有定义。
         """
         cfg, m = self.cfg, self.market
         q0 = cfg.base_position
@@ -499,11 +481,10 @@ class TradingEnv:
         flatten = [f for f in intraday if f.kind == "flatten"]
         qty = np.asarray([f.qty for f in intraday])
         liquidity = np.asarray([f.liquidity for f in intraday])
-        center_move = np.asarray([f.center_move for f in intraday if f.kind != "flatten"])
+        center_move = np.asarray([f.center_move for f in intraday])
         tau = np.asarray([iv.tau for iv in self.intervals], dtype=np.float64)
         excess = np.asarray([iv.excess for iv in self.intervals])
         chosen_width = np.asarray([iv.width for iv in self.intervals])
-        chosen_size = np.asarray([iv.size for iv in self.intervals])
         inventory_load = np.asarray([iv.inventory_load for iv in self.intervals])
         weight = tau / tau.sum()
         n_buy, n_sell = int((qty > 0).sum()), int((qty < 0).sum())
@@ -529,7 +510,6 @@ class TradingEnv:
             "boundary_time": float(weight @ ((excess <= -q0) | (excess >= q0))),
             "width_rel": self._width_rel(tau, chosen_width),
             "width_time": [float(weight @ (chosen_width == h)) for h in cfg.widths],
-            "size_time": [float(weight @ (chosen_size == s)) for s in cfg.sizes],
             "n_flatten": len(flatten),
             "flattened_lots": float(sum(abs(f.qty) for f in flatten)),
             "turnover": turnover / m.equity0,

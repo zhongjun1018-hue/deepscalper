@@ -11,7 +11,7 @@ from data_provider.windows import WindowSpec
 from control.config import Config
 from control.env import DayMarket, Observation
 from control.features import MACRO_DIM, MICRO_DIM, PRIVATE_DIM
-from control.model import BDQNetwork
+from control.model import BranchQNetwork
 from control.trace import greedy_policy, load_checkpoint, trace_day
 from control.train import save_checkpoint
 
@@ -21,7 +21,7 @@ class CheckpointRoundTripTest(unittest.TestCase):
 
     def test_config_weights_and_fixed_gears_survive_the_roundtrip(self):
         cfg = Config(symbols=("301308",))
-        net = BDQNetwork(cfg)
+        net = BranchQNetwork(cfg)
         with tempfile.TemporaryDirectory() as folder:
             path = os.path.join(folder, "GRID-FW_w0.1_lam3_seed0.pt")
             save_checkpoint(SimpleNamespace(online=net, fixed_gears=(2, None)), cfg, path)
@@ -45,7 +45,7 @@ class GreedyPolicyTest(unittest.TestCase):
 
     def test_gears_are_valid_and_fixed_branch_is_respected(self):
         cfg = Config(symbols=("301308",))
-        net = BDQNetwork(cfg).eval()
+        net = BranchQNetwork(cfg).eval()
         obs = self.make_obs(cfg)
         device = torch.device("cpu")
 
@@ -56,6 +56,15 @@ class GreedyPolicyTest(unittest.TestCase):
         fixed_width = cfg.widths.index(0.1)
         self.assertEqual(greedy_policy(net, device, (fixed_width, None))(obs)[0],
                          fixed_width)
+
+    def test_flatten_gear_is_masked_when_net_position_is_zero(self):
+        cfg = Config(symbols=("301308",))
+        net = BranchQNetwork(cfg).eval()
+        obs = self.make_obs(cfg)
+        obs.flatten_allowed = False
+
+        # 平仓档（半宽档 0）在净持仓为零时不可选（与 BranchQAgent.greedy 同一掩码）
+        self.assertNotEqual(greedy_policy(net, torch.device("cpu"), (None, None))(obs)[0], 0)
 
 
 class TraceDayTest(unittest.TestCase):
@@ -117,7 +126,7 @@ class TraceDayTest(unittest.TestCase):
 
 
 class TraceFlattenTest(unittest.TestCase):
-    """平仓档（width == 0）的扫单：偏离底仓即平仓，成交守恒且计入日内成交口径。"""
+    """平仓档（width == 0）：偏离底仓即按对手一档价平仓，成交守恒且计入日内成交口径。"""
 
     @classmethod
     def setUpClass(cls):
@@ -132,7 +141,7 @@ class TraceFlattenTest(unittest.TestCase):
             return (0, 0)
         return (cls.cfg.widths.index(0.05), 0)   # 最密网格，尽快产生超额敞口
 
-    def test_flatten_sweep_is_recorded(self):
+    def test_flatten_fill_is_recorded(self):
         decisions = self.result["decisions"]
         fills = self.result["fills"]
 
@@ -144,7 +153,7 @@ class TraceFlattenTest(unittest.TestCase):
                 self.assertIsNone(d["lower"])
                 self.assertEqual(d["size"], 0)
         flatten = [f for f in fills if f["kind"] == "flatten"]
-        self.assertTrue(flatten)   # 平仓扫单按逐档均价记在决策点上
+        self.assertTrue(flatten)   # 平仓按对手一档价记在决策点上
         self.assertTrue(all(f["t"] in flatten_ticks for f in flatten))
         signed = sum(f["qty"] if f["side"] == "buy" else -f["qty"] for f in fills)
         self.assertAlmostEqual(signed, 0.0, delta=1e-9)

@@ -15,14 +15,16 @@ import os
 
 import pandas as pd
 
-METHODS = ["HOLD", "OPEN", "SCAN", "GRID-FW", "GRID-NH", "GRID-NA", "GRID"]
+from .train import RL_VARIANTS, RULE_METHODS
+
+# 展示顺序：规则基线在前、完整 GRID 收尾，消融方法介于其间
+METHODS = [*RULE_METHODS, *(m for m in RL_VARIANTS if m != "GRID"), "GRID"]
 METRICS = ["TR", "SR", "CR", "SoR"]
-RULE_METHODS = {"HOLD", "OPEN", "SCAN"}
 
 
-def load_rows(result_dir: str) -> pd.DataFrame:
+def load_rows(runs_dir: str) -> pd.DataFrame:
     rows = []
-    for path in sorted(glob.glob(os.path.join(result_dir, "*", "*.json"))):
+    for path in sorted(glob.glob(os.path.join(runs_dir, "*", "*.json"))):
         with open(path, encoding="utf-8") as f:
             r = json.load(f)
         rows.append({"symbol": r["symbol"], "method": r["method"],
@@ -83,17 +85,17 @@ def selected_test_rows(df: pd.DataFrame, selection: pd.DataFrame) -> pd.DataFram
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--results", default="control/runs", help="结果根目录（<symbol>/ 结构）")
+    p.add_argument("--runs-dir", default="control/runs", help="结果根目录（<symbol>/ 结构）")
     args = p.parse_args()
 
-    df = load_rows(args.results)
+    df = load_rows(args.runs_dir)
     if df.empty:
-        print(f"未找到结果文件：{args.results}")
+        print(f"未找到结果文件：{args.runs_dir}")
         return
 
     sel = select_hyperparams(df)
     summary = test_summary(selected_test_rows(df, sel))
-    out_path = os.path.join(args.results, "summary.csv")
+    out_path = os.path.join(args.runs_dir, "summary.csv")
     summary.to_csv(out_path, index=False)
     print(summary.to_string(index=False))
 

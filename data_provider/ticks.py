@@ -48,6 +48,7 @@ class DayData:
     date: str
     frame: pd.DataFrame  # 索引 0..N-1，含 READ_COLS 全部字段
     pre_close: float     # 前收盘价
+    open_px: float       # 当日开盘价（集合竞价）
     atr: float           # 前 atr_days 个完整交易日真实波幅的均值（价格计）；历史不足记 nan
 
 
@@ -138,8 +139,9 @@ def load_days(symbol: str, data_dir: str = "data", atr_days: int = 3) -> list[Da
     for date, g in df.groupby("MDDate", sort=True):
         # 稳定排序：同一时间戳的快照保持原始顺序，确保累计量（成交量 / 成交笔数）单调
         g = g.sort_values("_ts", kind="stable").drop(columns="_ts").reset_index(drop=True)
-        pre_close = float(g["PreClosePx"].iloc[0])
-        days.append(DayData(date=str(date), frame=g, pre_close=pre_close, atr=float("nan")))
+        days.append(DayData(date=str(date), frame=g,
+                            pre_close=float(g["PreClosePx"].iloc[0]),
+                            open_px=float(g["OpenPx"].iloc[0]), atr=float("nan")))
 
     # ATR 与网格宽度共用同一 TR 实现；逐日 K 线无效的日期 TR 记 nan，使随后窗口亦失效
     tr = true_range(daily_bars(df)).reindex([d.date for d in days])

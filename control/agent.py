@@ -1,4 +1,4 @@
-"""BDQ 智能体：ε-greedy 决策、SMDP 折扣的 TD 更新、目标网络。
+"""分支 Q 智能体：ε-greedy 决策、SMDP 折扣的 TD 更新、目标网络。
 
 决策间隔 τ 由市场决定，故延续价值的折扣为 gamma^τ（gamma 为每 tick 口径，见 design 4.2）。
 """
@@ -11,7 +11,7 @@ import torch
 from .buffer import PrioritizedReplay, Transition
 from .config import Config
 from .env import DayMarket, Observation
-from .model import BDQNetwork, resolve_device, to_batch
+from .model import BranchQNetwork, resolve_device, to_batch
 
 
 def _branching_next_value(
@@ -19,12 +19,17 @@ def _branching_next_value(
     target_q: list[torch.Tensor],
     fixed_gears: tuple[int | None, ...],
     inactive_gears: tuple[int, ...],
+    flatten_allowed: torch.Tensor,
 ) -> torch.Tensor:
-    """以在线网络选动作、目标网络估值，并聚合有效的 BDQ 分支。
+    """以在线网络选动作、目标网络估值，并聚合有效的动作分支。
 
     半宽分支（分支 0）选择网格不触发档（平仓 / 关闭）时，数量分支对执行无意义，
-    延续价值只取半宽分支（design 6.3）。
+    延续价值只取半宽分支（design 6.3）；平仓档只在下一状态净持仓非零时可选，
+    动作选择与行为策略遵循同一掩码（design 5.1）。
     """
+    q0 = online_q[0].clone()
+    q0[~flatten_allowed, 0] = -torch.inf
+    online_q = [q0, *online_q[1:]]
     actions, values = [], []
     for fixed, oq, tq in zip(fixed_gears, online_q, target_q):
         if fixed is None:
@@ -43,7 +48,7 @@ def _branching_next_value(
     return torch.where(inactive, branch_values[0], joint)
 
 
-class BDQAgent:
+class BranchQAgent:
     """fixed_gears 给定某分支的档位索引时该分支不再探索（消融用），其余分支照常学习。"""
 
     def __init__(
@@ -54,13 +59,12 @@ class BDQAgent:
     ):
         self.cfg = cfg
         self.fixed_gears = fixed_gears
-        self.branch_sizes = (cfg.n_width, cfg.n_size)
         self.inactive_gears = cfg.inactive_gears
         self.device = resolve_device(cfg)
         torch.manual_seed(seed)
         self.rng = np.random.default_rng(seed)
-        self.online = BDQNetwork(cfg).to(self.device)
-        self.target = BDQNetwork(cfg).to(self.device).eval()
+        self.online = BranchQNetwork(cfg).to(self.device)
+        self.target = BranchQNetwork(cfg).to(self.device).eval()
         self.target.load_state_dict(self.online.state_dict())
         for p in self.target.parameters():
             p.requires_grad_(False)
@@ -77,13 +81,18 @@ class BDQAgent:
 
     def act(self, obs: Observation, epsilon: float) -> tuple[int, int]:
         if self.rng.random() < epsilon:
-            return self._apply_fixed([int(self.rng.integers(n)) for n in self.branch_sizes])
+            # 平仓档（半宽档 0）只在净持仓非零时可选，探索与贪心遵循同一掩码
+            lo = 0 if obs.flatten_allowed else 1
+            return self._apply_fixed([int(self.rng.integers(lo, self.cfg.n_width)),
+                                      int(self.rng.integers(self.cfg.n_size))])
         return self.greedy(obs)
 
     def greedy(self, obs: Observation) -> tuple[int, int]:
         self.online.eval()
         with torch.no_grad():
             q = self.online(*to_batch([obs], self.device))
+        if not obs.flatten_allowed:
+            q[0][:, 0] = -torch.inf
         return self._apply_fixed([int(b.argmax(-1).item()) for b in q])
 
     # ---- 学习 ----
@@ -119,12 +128,17 @@ class BDQAgent:
             next_value = torch.zeros(len(batch), device=self.device)
             keep = [i for i, o in enumerate(next_obs) if o is not None]
             if keep:
-                next_batch = to_batch([next_obs[i] for i in keep], self.device)
+                kept_obs = [next_obs[i] for i in keep]
+                next_batch = to_batch(kept_obs, self.device)
                 online_q = self.online(*next_batch)
                 target_q = self.target(*next_batch)
                 index = torch.as_tensor(keep, device=self.device)
+                flatten_allowed = torch.as_tensor(
+                    [o.flatten_allowed for o in kept_obs], device=self.device
+                )
                 next_value[index] = _branching_next_value(
-                    online_q, target_q, self.fixed_gears, self.inactive_gears
+                    online_q, target_q, self.fixed_gears, self.inactive_gears,
+                    flatten_allowed
                 )
             target = rewards + discount * next_value
 

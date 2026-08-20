@@ -18,18 +18,18 @@ OPEN_WIDTH = 0.1                                # 常开参照基线的半宽（
 SCAN_WIDTHS = (0.05, 0.1, 0.15, 0.2, 0.25)      # × ATR3
 
 
-def run_fixed_grid(markets: list[DayMarket], half_width: float, size: int = 1) -> dict:
-    """固定半宽的对称网格，全天不平仓、不做任何控制。
+def run_fixed_grid(markets: list[DayMarket], width: float) -> dict:
+    """固定半宽的对称网格（每笔 1 手），全天不平仓、不做任何控制。
 
-    half_width 以 ATR3 为单位，不必落在动作梯子上——规则层与档位表无关。
+    width 以 ATR3 为单位，不必落在动作梯子上——规则层与档位表无关。
     """
-    params = GridParams(half_width, size=size)
+    params = GridParams(width, size=1)
     return evaluate(markets, lambda obs: params)
 
 
 def run_open_grid(markets: list[DayMarket]) -> dict:
     """常开网格：成功判定的参照基线（design 7.2）。"""
-    return {**run_fixed_grid(markets, OPEN_WIDTH), "half_width": OPEN_WIDTH}
+    return {**run_fixed_grid(markets, OPEN_WIDTH), "width": OPEN_WIDTH}
 
 
 def run_grid_scan(val_markets: list[DayMarket], test_markets: list[DayMarket]) -> dict:
@@ -39,11 +39,11 @@ def run_grid_scan(val_markets: list[DayMarket], test_markets: list[DayMarket]) -
     其 `inventory_load` 为时间加权 $(I/B)^2$，即该格点承担的风险（design 7.4）。
     """
     val_sr = [run_fixed_grid(val_markets, h)["SR"] for h in SCAN_WIDTHS]
-    points = [{"half_width": h, **run_fixed_grid(test_markets, h)} for h in SCAN_WIDTHS]
+    points = [{"width": h, **run_fixed_grid(test_markets, h)} for h in SCAN_WIDTHS]
     best = points[int(np.argmax(val_sr))]
     return {**{k: best[k] for k in ("TR", "SR", "CR", "SoR", "daily_returns",
                                     "daily_closure_rate", "diagnostics")},
-            "best_point": {"half_width": best["half_width"]},
+            "best_point": {"width": best["width"]},
             "points": points}
 
 

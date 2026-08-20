@@ -3,7 +3,7 @@
 
 只记录环境真实提供的信息：决策点的生效网格按 env.step 的口径计算（决策点发生立即
 成交时中心已移至成交价，触发线按新中心重算），成交直接取自 env.fills——网格成交、
-决策点平仓与日终清仓的扫单都在其中，扫单按逐档均价成交（control/env.py）。
+决策点平仓与日终清仓都在其中，平仓与清仓按对手方一档价成交（control/env.py）。
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from strategy.grid import boundaries, half_width
 
 from .config import Config
 from .env import DayMarket, TradingEnv, action_params
-from .model import BDQNetwork, to_batch
+from .model import BranchQNetwork, to_batch
 
 
 def resolve_checkpoint(symbol: str, method: str = "GRID", seed: int = 0,
@@ -36,7 +36,7 @@ def resolve_checkpoint(symbol: str, method: str = "GRID", seed: int = 0,
         defaults = Config()
         w = defaults.hindsight_weight if w is None else w
         lam = defaults.inventory_lambda if lam is None else lam
-        folder = os.path.join(defaults.result_dir, symbol)
+        folder = os.path.join(defaults.runs_dir, symbol)
         path = os.path.join(folder, f"{method}_w{w:g}_lam{lam:g}_seed{seed}.pt")
         if not os.path.exists(path):
             matches = sorted(glob.glob(os.path.join(folder, f"{method}_*_seed{seed}.pt")))
@@ -54,31 +54,37 @@ def resolve_checkpoint(symbol: str, method: str = "GRID", seed: int = 0,
     return path
 
 
-def load_checkpoint(path: str, device) -> tuple[BDQNetwork, Config, tuple[int | None, int | None]]:
+def load_checkpoint(path: str, device) -> tuple[BranchQNetwork, Config, tuple[int | None, int | None]]:
     """加载 control/train.py save_checkpoint 保存的检查点：重建网络并加载权重（eval 模式）。
 
     返回（网络, 配置, 消融的固定档位）；固定档位经 greedy_policy 套用，回放才与训练评估
-    （BDQAgent.greedy）同一口径。
+    （BranchQAgent.greedy）同一口径。
     """
     payload = torch.load(path, map_location=device)
     config = dict(payload["config"])
+    # 旧检查点的配置字段名：result_dir 已更名 runs_dir
+    if "result_dir" in config:
+        config["runs_dir"] = config.pop("result_dir")
     # save_checkpoint 以 asdict 序列化配置，嵌套的 WindowSpec 需从 dict 还原
     config["window"] = WindowSpec(**config["window"])
     cfg = Config(**config)
-    net = BDQNetwork(cfg).to(device).eval()
+    net = BranchQNetwork(cfg).to(device).eval()
     net.load_state_dict(payload["state_dict"])
     return net, cfg, tuple(payload["fixed_gears"])
 
 
-def greedy_policy(net: BDQNetwork, device, fixed_gears: tuple[int | None, int | None]):
+def greedy_policy(net: BranchQNetwork, device, fixed_gears: tuple[int | None, int | None]):
     """由检查点网络构建贪心档位策略 policy(obs) → (半宽档, 数量档)。
 
     固定分支不取 argmax 而恒用指定档：消融训练中该分支只在固定档上收到监督，
-    其余档位的 Q 值未经训练（与 BDQAgent.greedy 同一口径）。
+    其余档位的 Q 值未经训练；平仓档只在净持仓非零时可选
+    （均与 BranchQAgent.greedy 同一口径）。
     """
     def policy(obs) -> tuple[int, int]:
         with torch.no_grad():
             q = net(*to_batch([obs], device))
+        if not obs.flatten_allowed:
+            q[0][:, 0] = -torch.inf
         gears = tuple(
             fixed if fixed is not None else int(branch.argmax(-1).item())
             for fixed, branch in zip(fixed_gears, q)
@@ -122,7 +128,8 @@ def trace_day(market: DayMarket, policy) -> dict:
 
     policy(obs) → 动作档位 (半宽档, 数量档)，由调用方以 greedy_policy 构造。返回：
       {"decisions": [{t, width, size, center, upper, lower}],  # 各决策点的生效网格
-       "fills": [{t, side, price, qty, kind}],                  # 全部成交（含扫单，kind 见 Fill）
+       "fills": [{t, side, price, qty, kind}],                  # 全部成交（含平仓与清仓，kind 见 Fill）
+       "ret": 相对底仓的超额收益（与 control.train.replay_day 同口径）,
        "log": episode_log 摘要}
     平仓档（width == 0）不建网格，upper / lower 记 None、size 记 0（与 env.step 一致）。
     """
@@ -155,4 +162,5 @@ def trace_day(market: DayMarket, policy) -> dict:
         obs = res.obs
     fills = [{"t": f.tick, "side": "buy" if f.qty > 0 else "sell",
               "price": f.price, "qty": abs(f.qty), "kind": f.kind} for f in env.fills]
-    return {"decisions": decisions, "fills": fills, "log": env.episode_log()}
+    return {"decisions": decisions, "fills": fills,
+            "ret": env.net_value() - 1.0, "log": env.episode_log()}

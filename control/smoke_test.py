@@ -8,7 +8,7 @@ from data_provider.split import chronological_split
 from data_provider.ticks import load_days
 from data_provider.windows import load_cache
 
-from .agent import BDQAgent
+from .agent import BranchQAgent
 from .baselines import run_fixed_grid
 from .buffer import Transition
 from .config import Config
@@ -17,7 +17,7 @@ from .features import fit_feature_stats
 from .train import build_markets
 
 
-def interact(env: TradingEnv, cfg: Config, agent: BDQAgent, day_id: int = 0) -> StepResult:
+def interact(env: TradingEnv, cfg: Config, agent: BranchQAgent, day_id: int = 0) -> StepResult:
     """交互一步并入队，返回环境结果。"""
     obs = env.observation()
     action = agent.act(obs, epsilon=1.0)
@@ -55,7 +55,7 @@ def main(symbol: str):
     print(f"build_markets + fit stats: {time.time()-t0:.1f}s, "
           f"train_days={len(train_m)}, window={m.window.shape}")
 
-    agent = BDQAgent(cfg, seed=0)
+    agent = BranchQAgent(cfg, seed=0)
     env = TradingEnv(m)
     obs = env.observation()
     print("obs shapes:", obs.micro_lob.shape, obs.private.shape, obs.macro.shape)
@@ -87,7 +87,7 @@ def main(symbol: str):
 
     # 固定半宽网格基线与贪心前向计时
     t0 = time.time()
-    fixed = run_fixed_grid([m], half_width=0.1)
+    fixed = run_fixed_grid([m], width=0.1)
     print(f"fixed grid (h=0.1): {time.time()-t0:.2f}s TR={fixed['TR']:.4f} "
           f"fills={fixed['diagnostics']['n_fills']:.0f} "
           f"mean_tau={fixed['diagnostics']['mean_tau']:.1f}")

@@ -2,20 +2,21 @@
 
 A 股 3 秒级 tick 快照上的成交驱动网格交易研究。同一数据与回测底座上运行两个算法：
 
-- **预测算法**（`forecast/`）：LightGBM 由 600-tick 窗口统计预测 5 个前瞻目标，预测值生成门控信号，控制固定 $0.1\times\mathrm{ATR}_3$ 网格的启停——门控只在净持仓为 0 时生效。
-- **强化学习算法**（`control/`）：BDQ 智能体在 SMDP 决策点自主设定网格半宽与成交量（半宽取 0 立即平回底仓，取极大值即停手），预测算法的输出同时作为其状态特征。
+- **预测算法**（`forecast/`）：行情模式识别门控——「低残差、强趋势」的低震荡路径是网格不利模式，其事后标签由残差趋势规则的粘性平滑给出，LightGBM 二分类由 600-tick 窗口统计输出不利模式概率，概率门控控制固定 $0.1\times\mathrm{ATR}_3$ 网格的启停——门控只在净持仓为 0 时生效。
+- **强化学习算法**（`control/`）：分支 Q 网络智能体在 SMDP 决策点自主设定网格半宽与成交量（半宽取 0 立即平回底仓，取极大值即停手），`forecast/` 的前瞻回归输出同时作为其状态特征。
 
 网格几何、穿价撮合与交易成本（双边佣金 $10^{-4}$、卖出印花税 $5\times10^{-4}$）统一定义在 `strategy/`；样本统一切分为 7:1:2（训练 / 验证 / 测试，单次时序切分）。设计与取舍见 [docs/design.md](docs/design.md)，特征定义见 [data/features.md](data/features.md)。
 
 ## 目录结构
 
 ```
-data/            原始 tick parquet（data/<code>/）与特征定义 features.md
+data/            原始 tick parquet（data/<symbol>/）与特征定义 features.md
 cache/           统一缓存 <symbol>.npz：逐 tick 的窗口特征、前瞻目标与预测结果（两个算法共用）
 data_provider/   数据管线：tick 加载与 ATR（ticks.py）、7:1:2 切分（split.py）、统一缓存（windows.py）与预建入口（cache.py）
 strategy/        网格策略与回测：成本、几何、ATR 半宽、报价驱动回放、指标、统一回测入口；产物在 strategy/runs/
-forecast/        预测算法：模型、训练、门控信号；产物在 forecast/runs/
-control/         强化学习算法：环境、BDQ 网络、智能体、训练、超参探索、结果汇总与冒烟测试；产物在 control/runs/
+forecast/        预测算法：前瞻回归（RL 状态特征，产物在 forecast/runs/）与行情模式识别 regime/
+                 （模式定义 / 识别 / 经济验证，产物在 forecast/regime/runs/）
+control/         强化学习算法：环境、分支 Q 网络、智能体、训练、超参探索、结果汇总与冒烟测试；产物在 control/runs/
 webviz/          决策过程查看器（导出 + 单页前端）
 utils/           图形样式与绘图
 tests/           单元测试
@@ -27,7 +28,7 @@ docs/            设计文档与网格收益推导
 ## 环境
 
 ```bash
-uv sync                # torch(CUDA 12.8) / numpy / pandas / lightgbm / matplotlib / wandb
+uv sync                # torch(CUDA 12.8) / numpy / pandas / lightgbm / scikit-learn / matplotlib / wandb
 .venv/bin/wandb login  # 首次使用需登录；离线或不记录见下文 --wandb-mode
 ```
 
@@ -35,7 +36,7 @@ uv sync                # torch(CUDA 12.8) / numpy / pandas / lightgbm / matplotl
 
 ## 数据
 
-`data/<code>/` 下放置月度 tick parquet（如 `301308.SZ_202602_tick.parquet`）。仅使用连续竞价时段（09:30–11:30、13:00–14:57）；每日 $\operatorname{ATR}_3$ 由此前 3 个完整交易日预计算，当日盘中恒定、无前视。窗口特征（47 维）、前瞻目标与预测结果（各 5 维）逐 tick 同存于 `cache/<symbol>.npz`，源数据或参数变化时自动重建，两个算法共同使用。
+`data/<symbol>/` 下放置月度 tick parquet（如 `301308.SZ_202602_tick.parquet`）。仅使用连续竞价时段（09:30–11:30、13:00–14:57）；每日 $\operatorname{ATR}_3$ 由此前 3 个完整交易日预计算，当日盘中恒定、无前视。窗口特征（47 维）、前瞻目标与预测结果（各 5 维）逐 tick 同存于 `cache/<symbol>.npz`，源数据或参数变化时自动重建，两个算法共同使用。
 
 ## 运行
 
@@ -46,11 +47,18 @@ uv sync                # torch(CUDA 12.8) / numpy / pandas / lightgbm / matplotl
 #    其余入口也会按需自动构建）
 .venv/bin/python -m data_provider.cache
 
-# 2. 预测算法：训练与 val/test 评估（幂等，参数或数据变化才重训；预测缓存同时是 RL 的状态特征；
+# 2. 前瞻回归：训练与 val/test 评估（幂等，参数或数据变化才重训；预测缓存是 RL 的状态特征；
 #    --plot 输出测试段预测对比图与相关性热力图）→ forecast/runs/
 .venv/bin/python -m forecast.train --plot
 
-# 3. 强化学习算法：全量实验的训练与测试段评估（基线 + RL 及消融，多进程并行；
+# 3. 行情模式识别：事后标签、识别器训练与 val/test AUC/AP 评估、门控阈值 τ 标定
+#    （幂等，统一回测与 webviz 也会按需自动重训）→ forecast/regime/runs/
+.venv/bin/python -m forecast.regime.train
+
+# 模式经济验证：常开回放下按不利模式占比分桶比较日度 g → forecast/regime/runs/economics.json
+.venv/bin/python -m forecast.regime.economics
+
+# 4. 强化学习算法：全量实验的训练与测试段评估（基线 + RL 及消融，多进程并行；
 #    幂等，可中断后续跑；只训练 RL 自身，预测缓存只读）→ control/runs/
 .venv/bin/python -m control.train
 
@@ -58,7 +66,7 @@ uv sync                # torch(CUDA 12.8) / numpy / pandas / lightgbm / matplotl
 .venv/bin/python -m control.train --methods GRID \
     --hindsight-weights 0.02 0.05 0.1 0.2 --inventory-lambdas 0 1 3 10 30
 
-# 超参数一次一因子探索（网络结构 / 优化 / SMDP 的 K 与 γ / 奖励塑形 / 目标网络与 PER，
+# 超参数一次一因子探索（网络结构 / 优化 / SMDP 的 K 与 γ / 奖励塑形 / 目标网络与优先级回放，
 # 每参数约 3 档、中心点为默认配置；幂等，断点续跑）→ control/runs/sweep/
 .venv/bin/python -m control.sweep --symbols 301308
 
@@ -72,8 +80,8 @@ uv sync                # torch(CUDA 12.8) / numpy / pandas / lightgbm / matplotl
 # 按验证集 SR 锁定 (w, λ)，汇总测试集指标 → control/runs/summary.csv（各段行情状态打印到控制台）
 .venv/bin/python -m control.summarize
 
-# 4. 统一回测（测试段：常开 / 真值与预测门控 / RL 智能体；预测缺失或过期时自动先重训，
-#    RL 检查点缺失时跳过 agent 模式）→ strategy/runs/
+# 5. 统一回测（测试段：常开 / 模式门控（事后标签与识别概率）/ RL 智能体；识别器或预测缓存
+#    缺失、过期时自动先重训，RL 检查点缺失时跳过 agent 模式）→ strategy/runs/
 .venv/bin/python -m strategy.backtest
 
 # 冒烟测试（可指定标的，默认 301308）
@@ -86,7 +94,8 @@ uv sync                # torch(CUDA 12.8) / numpy / pandas / lightgbm / matplotl
 ## 可视化
 
 ```bash
-# 预测算法：逐日价格、窗口统计与各门控方案的网格回放
+# 预测算法：逐日价格、窗口统计（含识别概率）与 常开/识别门控 的网格回放；
+# 同日也导出过 control 时，页面对比栏追加「强化学习决策」第三张卡片
 .venv/bin/python -m webviz.export --algorithm forecast --symbols 301308
 
 # 强化学习：从 control/runs/ 的检查点回放测试段贪心决策（需先跑 control.train 训练）
@@ -98,11 +107,12 @@ uv sync                # torch(CUDA 12.8) / numpy / pandas / lightgbm / matplotl
 
 ## 产物
 
-- `forecast/runs/`：模型（`model/`）与预测评估（`metrics.json`、可选 `figures/`）。
-- `strategy/runs/`：统一回测（`summary.json` 与各指标热力图 SVG：费用后网格收益 $g$、日均闭环率、成交次数、网格宽幅与门控占比）。
+- `forecast/runs/`：前瞻回归模型（`model/`）与预测评估（`metrics.json`、可选 `figures/`）。
+- `forecast/regime/runs/`：识别器（`model/`）、`meta.json`（含门控阈值 τ）、识别评估 `metrics.json` 与经济验证 `economics.json`。
+- `strategy/runs/`：统一回测（`summary.json` 与各指标热力图 SVG：费用后网格收益 $g$、日均闭环率与成交次数（各含等权与按成交笔数加权两个口径）、网格宽幅与门控占比）。
 - `control/runs/`：`<symbol>/<method>[_w<权重>][_lam<λ>][_seed<k>].json` 结果与同名 `.pt` 检查点（选模后的最佳权重与消融的固定档位，供统一回测与 webviz 回放），`summary.csv` 汇总表；`sweep/` 为超参探索的逐作业结果与 `sweep/summary.csv` 梯子对比表。
 - 每个 RL 作业同时建一个 wandb run（项目 `gridscalper`）：逐验证点记录训练奖励、Q 损失与验证 TR、SR 及选模判据曲线；训练结束记录测试集指标与逐日表（design 7.5）。
 
 ## 关键参数
 
-样本切分 7:1:2 / 网格半宽默认 $0.1\times\operatorname{ATR}_3$（下限为前收的 $10^{-3}$）/ 成本：双边佣金 $10^{-4}$、卖出印花税 $5\times10^{-4}$（`strategy/costs.py`）。RL 侧：底仓 50 手 / 仓位带 $[0,100]$ 手 / 半宽 7 档（$0$ 为平回底仓，$0.05$–$0.25\times\operatorname{ATR}_3$，$100$ 为关闭）$\times$ 数量 1 档 / 超时 200 tick / 每 tick 折扣 0.9995 / 存货惩罚 $\lambda=3$ / $w=0.2$ / 5 epochs（每 epoch 验证 3 次，选模取最近 3 点均值）/ 默认单种子（`control.train --seeds` 可扩展多种子）。预测侧：回看 600 tick、前瞻 300 tick、缓存逐 tick 一行、门控与训练行每 20 tick 一个、LightGBM 每目标一个回归器（平方损失，输入含 symbol_id 分类特征）、seed 2021。修改见 `control/config.py` 与 `forecast/config.py`。
+样本切分 7:1:2 / 网格半宽默认 $0.1\times\operatorname{ATR}_3$（下限为前收的 $10^{-3}$）/ 成本：双边佣金 $10^{-4}$、卖出印花税 $5\times10^{-4}$（`strategy/costs.py`）。RL 侧：底仓 50 手 / 仓位带 $[0,100]$ 手 / 半宽 7 档（$0$ 为平回底仓，$0.05$–$0.25\times\operatorname{ATR}_3$，$100$ 为关闭）$\times$ 数量 1 档 / 超时 200 tick / 每 tick 折扣 0.9995 / 存货惩罚 $\lambda=3$ / $w=0.2$ / 5 epochs（每 epoch 验证 3 次，选模取最近 3 点均值）/ 默认单种子（`control.train --seeds` 可扩展多种子）。预测侧：回看 600 tick、前瞻 300 tick、缓存逐 tick 一行、门控与训练行每 20 tick 一个、seed 2021；模式定义：残差宽比 < 1.3 且斜率宽比 > 0.9 的粘性平滑（保持概率 0.99、观测噪声 0.3），门控阈值 τ 验证段率配平；前瞻回归 LightGBM 每目标一个回归器（平方损失，输入含 symbol_id 分类特征）。修改见 `control/config.py`、`forecast/config.py` 与 `forecast/regime/config.py`。

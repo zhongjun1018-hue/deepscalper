@@ -33,21 +33,33 @@ HEATMAPS = [
     },
     {
         "stem": "closure_rate",
-        "name": {"zh": "日均闭环率", "en": "Closure Rate"},
+        "name": {"zh": "日均闭环率（等权）", "en": "Closure Rate (equal-weighted)"},
         "key": "mean_closure_rate", "scale": 100.0, "vmax": 100.0, "fmt": "{:.1f}",
         "unit": {"zh": "占比 (%)", "en": "Share (%)"},
     },
     {
+        "stem": "closure_rate_weighted",
+        "name": {"zh": "日均闭环率（加权）", "en": "Closure Rate (trade-weighted)"},
+        "key": "weighted_closure_rate", "scale": 100.0, "vmax": 100.0, "fmt": "{:.1f}",
+        "unit": {"zh": "占比 (%)", "en": "Share (%)"},
+    },
+    {
         "stem": "counts_trades",
-        "name": {"zh": "日均成交次数", "en": "Trades per Day"},
+        "name": {"zh": "日均成交次数（等权）", "en": "Trades per Day (equal-weighted)"},
         "key": "mean_trades", "fmt": "{:.1f}",
+        "unit": {"zh": "日均次数", "en": "Count per day"},
+    },
+    {
+        "stem": "counts_trades_weighted",
+        "name": {"zh": "日均成交次数（加权）", "en": "Trades per Day (trade-weighted)"},
+        "key": "weighted_trades", "fmt": "{:.1f}",
         "unit": {"zh": "日均次数", "en": "Count per day"},
     },
     {
         "stem": "width_rel",
         "name": {"zh": "日均网格宽幅", "en": "Grid Half-width"},
         "key": "mean_width_rel", "scale": 100.0, "fmt": "{:.2f}",
-        "unit": {"zh": "半宽 / 前收 (%)", "en": "Half-width / preclose (%)"},
+        "unit": {"zh": "半宽 / 开盘价 (%)", "en": "Half-width / open (%)"},
     },
     {
         "stem": "shares_gated",

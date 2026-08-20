@@ -14,7 +14,7 @@ from data_provider.windows import WindowSpec
 class Config:
     # ---- 路径 ----
     data_dir: str = "data"
-    result_dir: str = "control/runs"
+    runs_dir: str = "control/runs"
     cache_dir: str = "cache"        # 统一缓存目录（cache/<symbol>.npz）
 
     # ---- tick 窗口结构（回看与 bar 长度取自 window 规格，避免双份参数）----
@@ -30,10 +30,10 @@ class Config:
     # ---- 账户 ----
     base_position: int = 50         # 底仓 Q0（手）；仓位带为 [0, 2Q0]，底仓居中
 
-    # ---- 动作空间（BDQ 两分支：半宽 × 数量）----
-    # 半宽以 ATR3 为单位（跨标的可比）：0 表示在决策点扫单平回底仓（净敞口为零则无操作），
-    # 100 的半宽日内无法触发、效果等同关闭网格；两者都是网格不触发档，
-    # 数量分支在这两档下对执行无意义。数量档是风险规模接口，暂时收缩为 {1}。
+    # ---- 动作空间（两分支：半宽 × 数量）----
+    # 半宽以 ATR3 为单位（跨标的可比）：0 表示在决策点按对手方一档价平回底仓
+    #（仅净持仓非零时可选），100 的半宽日内无法触发、效果等同关闭网格；两者都是
+    # 网格不触发档，数量分支在这两档下对执行无意义。数量档是风险规模接口，暂时收缩为 {1}。
     widths: tuple[float, ...] = (0.0, 0.05, 0.1, 0.15, 0.2, 0.25, 100.0)
     sizes: tuple[int, ...] = (1,)
 
