@@ -10,7 +10,7 @@ from data_provider.ticks import load_days
 from data_provider.windows import WindowSpec
 from control.config import Config
 from control.env import DayMarket, Observation
-from control.features import MACRO_DIM, MICRO_DIM, PRIVATE_DIM
+from control.features import MACRO_DIM, MICRO_DIM, PRIVATE_DIM, FeatureStats
 from control.model import BranchQNetwork
 from control.trace import greedy_policy, load_checkpoint, trace_day
 from control.train import save_checkpoint
@@ -19,17 +19,23 @@ from control.train import save_checkpoint
 class CheckpointRoundTripTest(unittest.TestCase):
     """save_checkpoint → load_checkpoint 往返：权重与固定档位一致，嵌套 WindowSpec 还原为 dataclass。"""
 
-    def test_config_weights_and_fixed_gears_survive_the_roundtrip(self):
+    def test_config_weights_gears_and_stats_survive_the_roundtrip(self):
         cfg = Config(symbols=("301308",))
         net = BranchQNetwork(cfg)
+        stats = FeatureStats(np.zeros(66), np.ones(66), np.zeros(40), np.ones(40),
+                             clip=cfg.norm_clip)
         with tempfile.TemporaryDirectory() as folder:
             path = os.path.join(folder, "GRID-FW_w0.1_lam3_seed0.pt")
-            save_checkpoint(SimpleNamespace(online=net, fixed_gears=(2, None)), cfg, path)
-            restored, loaded_cfg, fixed_gears = load_checkpoint(path, torch.device("cpu"))
+            save_checkpoint(SimpleNamespace(online=net, fixed_gears=(2, None)), cfg,
+                            stats, path)
+            restored, loaded_cfg, fixed_gears, loaded_stats = load_checkpoint(
+                path, torch.device("cpu"))
 
         self.assertIsInstance(loaded_cfg.window, WindowSpec)
         self.assertEqual(loaded_cfg, cfg)
         self.assertEqual(fixed_gears, (2, None))   # 消融的固定档位随检查点往返
+        np.testing.assert_array_equal(loaded_stats.macro_std, stats.macro_std)
+        self.assertEqual(loaded_stats.clip, cfg.norm_clip)
         for name, weight in net.state_dict().items():
             torch.testing.assert_close(restored.state_dict()[name], weight)
 

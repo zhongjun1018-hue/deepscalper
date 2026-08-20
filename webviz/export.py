@@ -8,14 +8,15 @@
 页面以 forecast 目录为主索引，同日的 control 数据充当单日对比栏的第三张卡片
 （强化学习决策）及其回放路径。forecast 数据源：报价 data_provider.ticks.load_days
 （另用 path_stats 复算展示统计）；窗口统计、半宽与切分统一取自 forecast.regime.data
-的 bank；门控为识别概率 > τ（prediction），识别器缺失或过期时经 ensure_classifier
-先重训；网格事件 strategy.engine.run_day(trace=True)（门控只在净持仓为 0 时生效）。
+的 bank，窗口与门控节奏均为分钟锚点；门控为识别概率 > τ（prediction，逐分钟信号
+按锚点前向填充到 tick），识别器缺失或过期时经 ensure_classifier 先重训；网格事件
+strategy.engine.run_day(trace=True)（锚点门控 + 连续确认，只在净持仓为 0 时生效）。
 网格回放只覆盖测试段（样本外），其余日期仅导出价格与窗口。
 
-control 数据源：control.trace.load_checkpoint 重建网络、Config 与消融的固定档位，
-greedy_policy 构建贪心策略，prepare_test_markets 构建测试段市场（训练段拟合标准化
-统计量）；逐测试日 control.trace.trace_day 贪心回放，单日摘要与门控卡片同指标口径
-（g = 超额收益 × B / W_d，与 strategy.backtest 的 agent 模式一致）。
+control 数据源：control.trace.load_checkpoint 重建统一训练的网络、Config、消融的
+固定档位与池化标准化统计量，greedy_policy 构建贪心策略，prepare_test_markets 构建
+测试段市场；逐测试日 control.trace.trace_day 贪心回放（定长决策），单日摘要与门控
+卡片同指标口径（g = 超额收益 × B / W_d，与 strategy.backtest 的 agent 模式一致）。
 """
 
 from __future__ import annotations
@@ -30,7 +31,7 @@ from data_provider.ticks import list_symbols, load_days, minute_index, minute_la
 from data_provider.windows import path_stats
 from forecast.regime.classify import day_prob
 from forecast.regime.config import RegimeConfig
-from forecast.regime.data import load_bank
+from forecast.regime.data import expand_minutes, load_bank
 from forecast.regime.train import ensure_classifier
 from strategy import engine, metrics
 from strategy.grid import half_width
@@ -89,19 +90,23 @@ def finite(value, digits):
 
 
 def build_windows(table: dict, prob: np.ndarray, width: float | None,
-                  cfg: RegimeConfig) -> list:
+                  anchors: np.ndarray, cfg: RegimeConfig) -> list:
     """滑动窗口展示负载：趋势拟合、网格上下界、前瞻路径的实测统计与识别概率。
 
-    按门控的决策间隔取样：锚点 tick 的前瞻路径为 (t, t+H]，第 t 拍概率覆盖同一区间。
+    按分钟锚点取样：分钟 m 锚点的前瞻路径覆盖未来 pred_min 分钟，第 m 拍概率
+    覆盖同一区间。
     """
     log_mid = np.log(table["mid"])
     minute = table["minute"]
-    n = len(log_mid)
+    total = len(anchors)
     windows = []
-    for anchor in range(cfg.window.lookback_ticks - 1, n, cfg.stride_ticks):
-        end = anchor + cfg.window.pred_ticks
-        if end > n - 1:
-            break
+    for m in range(cfg.window.lookback_min - 1, total - cfg.window.pred_min):
+        anchor = anchors[m]
+        end_candidates = anchors[m + 1: m + cfg.window.pred_min + 1]
+        end_candidates = end_candidates[end_candidates >= 0]
+        if anchor < 0 or not len(end_candidates):
+            continue
+        end = int(end_candidates[-1])
         window = {"start": int(minute[anchor]), "end": int(minute[end]),
                   "minutes": int(minute[end] - minute[anchor])}
         path = log_mid[anchor:end + 1]
@@ -124,8 +129,8 @@ def build_windows(table: dict, prob: np.ndarray, width: float | None,
             stats = path_stats(path)
             window["features"] = {name: finite(stats[name][0], 8)
                                   for name in DISPLAY_PATH_NAMES}
-        if np.isfinite(prob[anchor]):
-            window["prediction"] = {"probability": round(float(prob[anchor]), 4)}
+        if np.isfinite(prob[m]):
+            window["prediction"] = {"probability": round(float(prob[m]), 4)}
         windows.append(window)
     return windows
 
@@ -152,15 +157,16 @@ def excluded_runs(mask, table: dict, t0: int) -> list:
 
 
 def build_grid(table: dict, width: float, t0: int, hard_exclude,
-               decide_interval: int) -> dict | None:
+               anchors: np.ndarray, confirm_n: int) -> dict | None:
     """自 t0 tick 起回放固定半宽网格：engine 事件流 + 形态指标 + 门控覆盖。"""
     n = len(table["mid"])
     if t0 >= n:
         return None
     take = np.arange(t0, n)   # 门控掩码逐 tick 对齐，随报价序列一并切片
+    anchors = anchors[anchors >= t0] - t0
     result = engine.run_day(table["bid1"][take], table["ask1"][take], table["mid"][take],
                             hard_exclude=None if hard_exclude is None else hard_exclude[take],
-                            width=width, decide_interval=decide_interval, trace=True)
+                            width=width, anchors=anchors, confirm_n=confirm_n, trace=True)
     x = table["x"][take]
     minute = table["minute"][take]
     events = []
@@ -212,10 +218,11 @@ def export_forecast_symbol(symbol: str, args, cfg: RegimeConfig, classifier,
     replay_dates = []
     for i, date in enumerate(bank.dates):
         table = tables[date]
+        anchors = bank.anchors[i]
         width = float(bank.width[i])
         if not np.isfinite(width):
             width = None
-        prob = day_prob(classifier, bank, i, symbol_id, cfg)
+        prob = day_prob(classifier, bank, i, symbol_id)
         payload = {
             "symbol": symbol,
             "date": str(date),
@@ -224,16 +231,18 @@ def export_forecast_symbol(symbol: str, args, cfg: RegimeConfig, classifier,
             "preclose": round(float(table["preclose"]), 4),
             "x": [round(float(v), 3) for v in table["x"]],
             "price": [round(float(v), 4) for v in table["lastpx"]],
-            "windows": build_windows(table, prob, width, cfg),
+            "windows": build_windows(table, prob, width, anchors, cfg),
         }
         if i in candidate_set:
-            # 统一自可预测起点（回看窗满的 lookback_ticks）起回放
-            t0 = cfg.window.lookback_ticks
+            # 统一自可预测起点（回看窗满首分钟的锚点）起回放
+            t0 = bank.replay_start(i, cfg.window.lookback_min - 1)
             with np.errstate(invalid="ignore"):
-                mask = prob > threshold
-            grids = {"none": build_grid(table, width, t0, None, cfg.stride_ticks),
-                     "prediction": build_grid(table, width, t0, mask,
-                                              cfg.stride_ticks)}
+                mask = expand_minutes(prob > threshold, anchors,
+                                      len(table["mid"])) > 0.5
+            grids = {"none": build_grid(table, width, t0, None, anchors,
+                                        cfg.confirm_n),
+                     "prediction": build_grid(table, width, t0, mask, anchors,
+                                              cfg.confirm_n)}
             if grids["none"] is not None:
                 payload["t0"] = int(table["minute"][t0])
                 payload["grids"] = grids
@@ -273,24 +282,16 @@ def day_summary(result: dict, market, cfg, table: dict) -> dict:
     }
 
 
-def export_control_symbol(symbol: str, args, parser) -> dict:
-    """从控制器检查点回放测试段的贪心决策轨迹并导出，返回 index.json 的符号条目。"""
-    from control.config import Config as ControlConfig
-    from control.model import resolve_device
-    from control.trace import (greedy_policy, load_checkpoint,
-                               prepare_test_markets, resolve_checkpoint,
-                               trace_day)
+def export_control_symbol(symbol: str, checkpoint: tuple, args) -> dict:
+    """按统一训练检查点回放该标的测试段的贪心决策轨迹并导出，返回 index.json 的符号条目。"""
+    from data_provider.ticks import load_days as load_symbol_days
+    from control.trace import greedy_policy, prepare_test_markets, trace_day
 
-    try:
-        path = resolve_checkpoint(symbol, args.method, args.seed, args.w, args.lam,
-                                  args.checkpoint)
-    except (FileNotFoundError, ValueError) as exc:
-        parser.error(str(exc))
-    device = resolve_device(ControlConfig())
-    net, cfg, fixed_gears = load_checkpoint(path, device)
-    test_days, test_m = prepare_test_markets(symbol, cfg, args.data_dir, args.cache_dir)
-    tables = {d.date: day_table(d) for d in test_days}
-    del test_days
+    net, cfg, fixed_gears, stats, device, path = checkpoint
+    test_m = prepare_test_markets(symbol, cfg, stats, args.data_dir, args.cache_dir)
+    day_lookup = {d.date: d for d in load_symbol_days(symbol, data_dir=args.data_dir)}
+    tables = {m.date: day_table(day_lookup[m.date]) for m in test_m}
+    del day_lookup
     policy = greedy_policy(net, device, fixed_gears)
 
     out_dir = os.path.join(args.out_dir, "control", symbol)
@@ -333,13 +334,29 @@ def export_control_symbol(symbol: str, args, parser) -> dict:
                         checkpoint=os.path.basename(path))
 
 
+def load_control_checkpoint(args, parser) -> tuple:
+    """加载统一训练检查点，返回 (net, cfg, fixed_gears, stats, device, path)。"""
+    from control.config import Config as ControlConfig
+    from control.model import resolve_device
+    from control.trace import load_checkpoint, resolve_checkpoint
+
+    try:
+        path = resolve_checkpoint(args.method, args.seed, args.w, args.lam,
+                                  args.checkpoint)
+    except (FileNotFoundError, ValueError) as exc:
+        parser.error(str(exc))
+    device = resolve_device(ControlConfig())
+    net, cfg, fixed_gears, stats = load_checkpoint(path, device)
+    return net, cfg, fixed_gears, stats, device, path
+
+
 def forecast_params(cfg: RegimeConfig, threshold: float) -> dict:
-    """index.json 的展示参数（forecast 语义：tick 口径窗口参数、模式与门控参数）。"""
+    """index.json 的展示参数（forecast 语义：分钟口径窗口参数、模式与门控参数）。"""
     return {
         "model": "LightGBM",
-        "lookback_ticks": cfg.window.lookback_ticks,
-        "pred_ticks": cfg.window.pred_ticks,
-        "stride_ticks": cfg.stride_ticks,
+        "lookback_min": cfg.window.lookback_min,
+        "pred_min": cfg.window.pred_min,
+        "confirm_n": cfg.confirm_n,
         "atr_mult": cfg.window.atr_mult,
         "atr_window": cfg.window.atr_window,
         "min_width_ratio": cfg.window.min_width_ratio,
@@ -401,7 +418,9 @@ def main() -> None:
         update_index(args.out_dir, "forecast", entries,
                      forecast_params(cfg, threshold))
     else:
-        entries = [export_control_symbol(symbol, args, parser) for symbol in symbols]
+        checkpoint = load_control_checkpoint(args, parser)
+        entries = [export_control_symbol(symbol, checkpoint, args)
+                   for symbol in symbols]
         update_index(args.out_dir, "control", entries)
     for entry in entries:
         print(f"{args.algorithm} {entry['symbol']}: {len(entry['dates'])} 个交易日"

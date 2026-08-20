@@ -1,11 +1,10 @@
 """模式定义：残差趋势模式的事后标签（规则观测 + 粘性平滑）。
 
-网格不利模式为「低残差、强趋势」——低震荡路径上网格被单边穿越。逐 tick 规则
+网格不利模式为「低残差、强趋势」——低震荡路径上网格被单边穿越。逐锚点规则
 `resid_abs_q90/w < 残差阈值 ∧ abs_slope/w > 斜率阈值`（w 为当日相对半宽）给出
-带噪观测；stride 序列上以粘性转移（对角 sticky_stay）、对称混淆（emission_noise）
-做前向-后向平滑，硬标签取平滑后验——状态连片，消除逐 tick 真值抖动。
+带噪观测；分钟锚点序列上以粘性转移（对角 sticky_stay）、对称混淆（emission_noise）
+做前向-后向平滑，硬标签取平滑后验——状态连片，消除逐拍真值抖动。不可判定记 -1。
 
-标签展开到全 tick 采用前向填充（决策节奏本就是每 stride 一拍）；不可判定记 -1。
 平滑用了整日序列（含未来），因此标签只作事后真值：训练识别器的目标与回测的
 oracle 参照，不直接用于盘中决策。
 """
@@ -19,7 +18,7 @@ from forecast.regime.data import RESID_IDX, SLOPE_IDX, SymbolBank
 
 
 def rule_hits(bank: SymbolBank, cfg: RegimeConfig) -> np.ndarray:
-    """(D,R) int8 逐 tick 规则观测：1 = 命中（不利），0 = 未命中，-1 = 不可判定。"""
+    """(D,M) int8 逐锚点规则观测：1 = 命中（不利），0 = 未命中，-1 = 不可判定。"""
     with np.errstate(invalid="ignore"):
         hit = (bank.judgeable
                & (bank.realized[..., RESID_IDX] < cfg.residual_ratio_threshold)
@@ -28,22 +27,19 @@ def rule_hits(bank: SymbolBank, cfg: RegimeConfig) -> np.ndarray:
 
 
 def pattern_labels(bank: SymbolBank, cfg: RegimeConfig) -> np.ndarray:
-    """(D,R) int8 事后模式标签：规则观测经粘性平滑（1 = 不利，-1 不可判定）。"""
+    """(D,M) int8 事后模式标签：规则观测经粘性平滑（1 = 不利，-1 不可判定）。"""
     observed = rule_hits(bank, cfg)
-    n_days, n_ticks = observed.shape
-    grid = np.arange(0, n_ticks, cfg.stride_ticks)
     noise = cfg.emission_noise
-    out = np.full((n_days, n_ticks), -1, dtype=np.int8)
-    for i in range(n_days):
-        obs = observed[i, grid]
+    out = np.full(observed.shape, -1, dtype=np.int8)
+    for i in range(len(observed)):
+        obs = observed[i]
         if not (obs >= 0).any():
             continue
-        emission = np.ones((len(grid), 2))   # 不可判定拍发射均匀，仅靠转移传播
+        emission = np.ones((len(obs), 2))   # 不可判定拍发射均匀，仅靠转移传播
         emission[obs == 1] = (noise, 1.0 - noise)
         emission[obs == 0] = (1.0 - noise, noise)
         posterior = _forward_backward(emission, cfg.sticky_stay)
-        hard = (posterior > 0.5).astype(np.int8)
-        out[i] = np.repeat(hard, cfg.stride_ticks)[:n_ticks]
+        out[i] = (posterior > 0.5).astype(np.int8)
     out[~bank.judgeable] = -1
     return out
 

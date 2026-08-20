@@ -6,14 +6,15 @@
     「逐快照量的窗口聚合」者，其逐快照原语均以同一定义纳入。
 
 宏观特征（11 + 24 + 5 = 40 维，均进 MLP 通道）：
-  - 11 维：将回看窗口聚合为 30 根 20-tick OHLCV bar，计算 10 个相对价格
-    指标并补充相对量能指标；
+  - 11 维：回看窗口的 30 根 1 分钟 OHLCV bar（DayMarket 按分钟网格预聚合），
+    计算 10 个相对价格指标并补充相对量能指标；
   - 24 维 + 5 维：统一缓存的窗口统计（只取 MACRO_FEATURE_NAMES 一档）与 LightGBM
-    前瞻预测（data_provider/windows.py），行索引即 tick 索引，由 DayMarket.macro_at
-    取决策 tick 所在行拼接，与 11 维共用同一套标准化统计量。
+    前瞻预测（data_provider/windows.py），行索引即分钟索引，由 DayMarket.macro_at
+    取决策锚点所在行拼接，与 11 维共用同一套标准化统计量。
 
-私有状态（7 维，data/features.md §5.3）：由 PRIV_RAW_DIM 列的原始记录在 DayMarket.observe
-中归一得到，原始列见 PRIV_* 常量。
+私有状态（11 维，data/features.md §5.3）：由 PRIV_RAW_DIM 列的原始记录在
+DayMarket.observe 中归一得到（含决策区间内成交过程的 4 个通道），原始列见
+PRIV_* 常量。
 """
 
 from __future__ import annotations
@@ -44,17 +45,23 @@ MACRO_FEATURE_COLUMNS = np.array(
 WINDOW_DIM = len(MACRO_FEATURE_NAMES)  # 进宏观通道的窗口统计
 PRED_DIM = len(TARGET_NAMES)           # LightGBM 前瞻目标预测（统一缓存的 preds）
 MACRO_DIM = BAR_DIM + WINDOW_DIM + PRED_DIM
-PRIVATE_DIM = 7
+PRIVATE_DIM = 11
 
-# 私有状态的原始记录列（按 tick 保存，归一后喂入 LSTM）
-PRIV_POS, PRIV_CASH, PRIV_CENTER, PRIV_WIDTH, PRIV_SIZE, PRIV_LAST_FILL = range(6)
-PRIV_RAW_DIM = 6
+# 私有状态的原始记录列（按 tick 保存，锚点抽样后归一喂入 LSTM）：
+# 前 6 列为账户与网格状态；后 6 列服务决策区间内成交过程的 4 个通道——
+# 累计买卖笔数（相邻锚点差分即步内笔数）与当前区间的成交统计
+#（起点中间价 p_dec、最近成交价、相对 p_dec 的带符号累计成交额与累计手数）。
+(PRIV_POS, PRIV_CASH, PRIV_CENTER, PRIV_WIDTH, PRIV_SIZE, PRIV_LAST_FILL,
+ PRIV_CUM_BUYS, PRIV_CUM_SELLS, PRIV_DEC_MID, PRIV_LAST_PX,
+ PRIV_INT_NOTIONAL, PRIV_INT_LOTS) = range(12)
+PRIV_RAW_DIM = 12
 
 
 class FeatureStats:
     """基于训练集拟合的 z-score 标准化统计量（微观 66 维 + 宏观 40 维）。
 
-    仅用训练交易日拟合，验证 / 测试集复用同一统计量，避免未来信息泄漏。
+    仅用池化训练交易日拟合，验证 / 测试集复用同一统计量，避免未来信息泄漏；
+    统计量随检查点保存，回放侧不重新拟合。
     """
 
     def __init__(self, micro_mean, micro_std, macro_mean, macro_std, clip: float):
@@ -68,24 +75,54 @@ class FeatureStats:
     def macro(self, x: np.ndarray) -> np.ndarray:
         return np.clip((x - self.macro_mean) / self.macro_std, -self.clip, self.clip).astype(np.float32)
 
+    def state_dict(self) -> dict:
+        """检查点序列化：均值 / 标准差存为张量（torch.load 默认只接受权重类对象）。"""
+        import torch
+
+        return {name: torch.as_tensor(getattr(self, name), dtype=torch.float64)
+                for name in ("micro_mean", "micro_std", "macro_mean", "macro_std")
+                } | {"clip": self.clip}
+
+    @classmethod
+    def from_state_dict(cls, state: dict) -> "FeatureStats":
+        return cls(*(np.asarray(state[name]) for name in
+                     ("micro_mean", "micro_std", "macro_mean", "macro_std")),
+                   clip=state["clip"])
+
+
+class _Moments:
+    """流式均值 / 标准差累加器：池化拟合无需在内存中拼接全部样本行。"""
+
+    def __init__(self):
+        self.count = 0
+        self.total = self.squares = 0.0
+
+    def add(self, rows: np.ndarray) -> None:
+        rows = np.asarray(rows, dtype=np.float64)
+        self.count += len(rows)
+        self.total = self.total + rows.sum(axis=0)
+        self.squares = self.squares + (rows ** 2).sum(axis=0)
+
+    def stats(self) -> tuple[np.ndarray, np.ndarray]:
+        mean = self.total / self.count
+        variance = np.maximum(self.squares / self.count - mean ** 2, 0.0)
+        return mean, np.maximum(np.sqrt(variance), 1e-8)
+
 
 def fit_feature_stats(markets, cfg) -> FeatureStats:
-    """在训练 markets 上拟合特征统计量。
+    """在（池化的）训练 markets 上拟合特征统计量。
 
-    决策点由事件触发、依策略而变，故宏观统计量在固定 tick 网格 sample_points 上拟合，
-    使标准化口径与策略无关；微观特征抽样以控制内存。
+    宏观统计量在固定分钟锚点网格 sample_points 上拟合，与决策相位无关（训练起点
+    随机偏移不影响标准化口径）；微观特征抽样以控制内存。
     """
-    micro_rows, macro_rows = [], []
+    micro, macro = _Moments(), _Moments()
     for m in markets:
-        micro_rows.append(m.micro[::4])
-        macro_rows.extend(m.macro_at(t, normalized=False) for t in m.sample_points)
-    micro_all = np.concatenate(micro_rows).astype(np.float64)
-    macro_all = np.asarray(macro_rows, dtype=np.float64)
-    return FeatureStats(
-        micro_all.mean(0), np.maximum(micro_all.std(0), 1e-8),
-        macro_all.mean(0), np.maximum(macro_all.std(0), 1e-8),
-        clip=cfg.norm_clip,
-    )
+        micro.add(m.micro[::4])
+        macro.add([m.macro_at(t, normalized=False) for t in m.sample_points])
+    micro_mean, micro_std = micro.stats()
+    macro_mean, macro_std = macro.stats()
+    return FeatureStats(micro_mean, micro_std, macro_mean, macro_std,
+                        clip=cfg.norm_clip)
 
 
 def _safe_ratio(num: np.ndarray, den: np.ndarray) -> np.ndarray:
@@ -209,25 +246,21 @@ def build_micro_matrix(frame: pd.DataFrame) -> np.ndarray:
     return np.nan_to_num(feats, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
 
 
-def build_macro_features(mid_window: np.ndarray, vol_window: np.ndarray, n_bars: int) -> np.ndarray:
-    """由回看窗口的中间价 / 成交量序列构建宏观特征 (BAR_DIM,)。"""
-    bars = mid_window.reshape(n_bars, -1)
-    closes = bars[:, -1]
-    bar_vol = vol_window.reshape(n_bars, -1).sum(axis=1)
+def build_macro_features(bars: np.ndarray) -> np.ndarray:
+    """由回看窗口的分钟 bar 序列构建宏观特征 (BAR_DIM,)。
 
+    bars 为 (n_bars, 5) 的 [open, high, low, close, volume]（中间价 OHLC，
+    无快照分钟已按前收盘价填充、量能记 0，见 DayMarket）。
+    """
+    closes = bars[:, 3]
+    volumes = bars[:, 4]
     c = closes[-1]                               # 中间价恒为正，无需除零保护
-    z_close = c / closes[-2] - 1.0
     feats = [
         bars[-1, 0] / c - 1.0,                   # z_open
-        bars[-1].max() / c - 1.0,                # z_high
-        bars[-1].min() / c - 1.0,                # z_low
-        z_close,                                 # z_close
+        bars[-1, 1] / c - 1.0,                   # z_high
+        bars[-1, 2] / c - 1.0,                   # z_low
+        c / closes[-2] - 1.0,                    # z_close
     ]
     feats += [closes[-k:].mean() / c - 1.0 for k in (5, 10, 15, 20, 25, 30)]  # z_d_k
-    feats.append(_safe_ratio(bar_vol[-1], bar_vol.mean()) - 1.0)              # z_volume
+    feats.append(_safe_ratio(volumes[-1], volumes.mean()) - 1.0)              # z_volume
     return np.asarray(feats, dtype=np.float32)
-
-
-def future_price_index(t: int, horizon: int, n: int) -> int:
-    """hindsight 标签的未来终点（不跨交易日，尾部截断）。"""
-    return min(t + horizon, n - 1)

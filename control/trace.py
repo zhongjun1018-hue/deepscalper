@@ -1,5 +1,5 @@
-"""RL 检查点工具与决策轨迹回放：解析 / 加载训练检查点、构建贪心策略与测试段市场
-（webviz 与统一回测共用），并对单个交易日贪心回放记录网格与成交（webviz 用）。
+"""RL 检查点工具与决策轨迹回放：解析 / 加载统一训练检查点、构建贪心策略与测试段
+市场（webviz 与统一回测共用），并对单个交易日贪心回放记录网格与成交（webviz 用）。
 
 只记录环境真实提供的信息：决策点的生效网格按 env.step 的口径计算（决策点发生立即
 成交时中心已移至成交价，触发线按新中心重算），成交直接取自 env.fills——网格成交、
@@ -18,17 +18,19 @@ from strategy.grid import boundaries, half_width
 
 from .config import Config
 from .env import DayMarket, TradingEnv, action_params
+from .features import FeatureStats
 from .model import BranchQNetwork, to_batch
 
 
-def resolve_checkpoint(symbol: str, method: str = "GRID", seed: int = 0,
+def resolve_checkpoint(method: str = "GRID", seed: int = 0,
                        w: float | None = None, lam: float | None = None,
                        checkpoint: str | None = None) -> str:
     """检查点路径：checkpoint 显式给定，否则按 control/runs 的结果命名规则解析。
 
-    完整名为 <method>_w<w>_lam<λ>_seed<s>.pt（w/λ 缺省取 control Config 默认值）；control.train 的
-    命名规则是不适用的超参不在文件名中（如 GRID-NH 无 w 标签），完整名未命中时退到
-    <method>*_seed<s>.pt 的唯一匹配。不唯一抛 ValueError，未找到抛 FileNotFoundError。
+    完整名为 <method>_w<w>_lam<λ>_seed<s>.pt（w/λ 缺省取 control Config 默认值）；
+    control.train 的命名规则是不适用的超参不在文件名中（如 GRID-NH 无 w 标签），
+    完整名未命中时退到 <method>*_seed<s>.pt 的唯一匹配。不唯一抛 ValueError，
+    未找到抛 FileNotFoundError。
     """
     if checkpoint:
         path = checkpoint
@@ -36,91 +38,90 @@ def resolve_checkpoint(symbol: str, method: str = "GRID", seed: int = 0,
         defaults = Config()
         w = defaults.hindsight_weight if w is None else w
         lam = defaults.inventory_lambda if lam is None else lam
-        folder = os.path.join(defaults.runs_dir, symbol)
-        path = os.path.join(folder, f"{method}_w{w:g}_lam{lam:g}_seed{seed}.pt")
+        path = os.path.join(defaults.runs_dir, f"{method}_w{w:g}_lam{lam:g}_seed{seed}.pt")
         if not os.path.exists(path):
-            matches = sorted(glob.glob(os.path.join(folder, f"{method}_*_seed{seed}.pt")))
+            matches = sorted(glob.glob(
+                os.path.join(defaults.runs_dir, f"{method}_*_seed{seed}.pt")))
             if len(matches) == 1:
                 path = matches[0]
             elif len(matches) > 1:
-                raise ValueError(f"{symbol} 的 {method} 检查点不唯一："
+                raise ValueError(f"{method} 检查点不唯一："
                                  + "、".join(os.path.basename(m) for m in matches)
                                  + "；请用 --w/--lam 或 --checkpoint 明确指定。")
     if not os.path.exists(path):
         raise FileNotFoundError(
-            f"未找到 {symbol} 的 RL 检查点：{path}。"
+            f"未找到 RL 检查点：{path}。"
             "请先运行 python -m control.train 完成训练（断点续跑会复用已有产物），"
             "或用 --checkpoint 显式指定检查点路径。")
     return path
 
 
-def load_checkpoint(path: str, device) -> tuple[BranchQNetwork, Config, tuple[int | None, int | None]]:
-    """加载 control/train.py save_checkpoint 保存的检查点：重建网络并加载权重（eval 模式）。
+def load_checkpoint(path: str, device) -> tuple[BranchQNetwork, Config,
+                                                tuple[int | None, int | None],
+                                                FeatureStats | None]:
+    """加载 control/train.py save_checkpoint 保存的检查点（eval 模式）。
 
-    返回（网络, 配置, 消融的固定档位）；固定档位经 greedy_policy 套用，回放才与训练评估
-    （BranchQAgent.greedy）同一口径。
+    返回（网络, 配置, 消融的固定档位, 池化标准化统计量）；固定档位经 greedy_policy
+    套用，回放才与训练评估（BranchQAgent.greedy）同一口径；统计量随检查点保存，
+    回放侧不重新拟合（prepare_test_markets）。
     """
     payload = torch.load(path, map_location=device)
     config = dict(payload["config"])
-    # 旧检查点的配置字段名：result_dir 已更名 runs_dir
-    if "result_dir" in config:
-        config["runs_dir"] = config.pop("result_dir")
     # save_checkpoint 以 asdict 序列化配置，嵌套的 WindowSpec 需从 dict 还原
     config["window"] = WindowSpec(**config["window"])
     cfg = Config(**config)
     net = BranchQNetwork(cfg).to(device).eval()
     net.load_state_dict(payload["state_dict"])
-    return net, cfg, tuple(payload["fixed_gears"])
+    stats = (FeatureStats.from_state_dict(payload["feature_stats"])
+             if payload["feature_stats"] is not None else None)
+    return net, cfg, tuple(payload["fixed_gears"]), stats
 
 
 def greedy_policy(net: BranchQNetwork, device, fixed_gears: tuple[int | None, int | None]):
     """由检查点网络构建贪心档位策略 policy(obs) → (半宽档, 数量档)。
 
     固定分支不取 argmax 而恒用指定档：消融训练中该分支只在固定档上收到监督，
-    其余档位的 Q 值未经训练；平仓档只在净持仓非零时可选
-    （均与 BranchQAgent.greedy 同一口径）。
+    其余档位的 Q 值未经训练；平仓档只在净持仓非零时可选；数量单档时网络无数量
+    分支，数量档恒为 0（均与 BranchQAgent 同一口径）。
     """
     def policy(obs) -> tuple[int, int]:
         with torch.no_grad():
             q = net(*to_batch([obs], device))
         if not obs.flatten_allowed:
             q[0][:, 0] = -torch.inf
-        gears = tuple(
+        gears = [
             fixed if fixed is not None else int(branch.argmax(-1).item())
             for fixed, branch in zip(fixed_gears, q)
-        )
-        return gears
+        ]
+        return gears[0], gears[1] if len(gears) > 1 else 0
 
     return policy
 
 
-def prepare_test_markets(symbol: str, cfg: Config, data_dir: str = "data",
-                         cache_dir: str = "cache") -> tuple[list, list[DayMarket]]:
-    """按 7:1:2 切分构建测试段回放市场，返回（测试日 DayData, 测试 DayMarket）。
+def prepare_test_markets(symbol: str, cfg: Config, stats: FeatureStats | None,
+                         data_dir: str = "data",
+                         cache_dir: str = "cache") -> list[DayMarket]:
+    """按 7:1:2 切分构建一个标的的测试段回放市场并挂载检查点的标准化统计量。
 
-    标准化统计量仅用训练段拟合、测试段复用（无前视泄漏，与 control.train 同一口径）；
-    symbol_id 与 forecast 同口径：排序后标的集合中的索引。
+    统计量来自检查点（统一训练在全池训练段拟合，无前视泄漏）；symbol_id 与
+    forecast 同口径：排序后标的集合中的索引。
     """
     from data_provider.split import chronological_split
     from data_provider.ticks import load_days
     from data_provider.windows import load_cache
 
-    from .features import fit_feature_stats
     from .train import build_markets
 
     days = load_days(symbol, data_dir, cfg.window.atr_window)
     split = chronological_split([d.date for d in days])
-    train_days = [d for d in days if d.date in set(split.train)]
     test_days = [d for d in days if d.date in set(split.test)]
     cache = load_cache(symbol, data_dir=data_dir, cache_dir=cache_dir,
                        spec=cfg.window, zero_nan=True)
     symbol_id = sorted(cfg.symbols).index(symbol) if symbol in cfg.symbols else 0
-    train_m = build_markets(train_days, cfg, cache, symbol_id)
-    test_m = build_markets(test_days, cfg, cache, symbol_id)
-    stats = fit_feature_stats(train_m, cfg) if cfg.normalize else None
-    for market in train_m + test_m:
+    test_markets = build_markets(test_days, cfg, cache, symbol_id)
+    for market in test_markets:
         market.set_stats(stats)
-    return test_days, test_m
+    return test_markets
 
 
 def trace_day(market: DayMarket, policy) -> dict:

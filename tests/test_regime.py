@@ -8,7 +8,7 @@ from forecast.regime.config import RegimeConfig
 from forecast.regime.data import RESID_IDX, SLOPE_IDX, SymbolBank
 from forecast.regime.labels import pattern_labels, rule_hits
 
-N_TICKS = 21
+N_TICKS = 21   # 合成 bank 的分钟行数（真实缓存为 237）
 
 
 def make_bank(resid, slope, judgeable=None):
@@ -21,13 +21,13 @@ def make_bank(resid, slope, judgeable=None):
     realized[~judgeable] = np.nan
     return SymbolBank(symbol="TEST", dates=np.array(["20260102"]), split=None,
                       width=np.array([0.1]), features=np.zeros((1, N_TICKS, 47)),
-                      realized=realized, judgeable=judgeable, quotes={},
+                      realized=realized, judgeable=judgeable,
+                      anchors=np.tile(np.arange(N_TICKS), (1, 1)), quotes={},
                       open_px={})
 
 
 def make_config(**overrides):
-    """stride 取 1，便于逐 tick 检查平滑行为。"""
-    defaults = dict(stride_ticks=1, sticky_stay=0.99, emission_noise=0.3)
+    defaults = dict(sticky_stay=0.99, emission_noise=0.3)
     defaults.update(overrides)
     return RegimeConfig(**defaults)
 

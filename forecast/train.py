@@ -1,9 +1,9 @@
 """LightGBM 前瞻回归的训练与预测产线（RL 状态特征的数据源）。
 
 各标的缓存按 data_provider.split.chronological_split 逐标的单次时序切分，
-训练集跨标的池化 fit、验证集早停；训练与评估只取每 stride_ticks 一行（相邻 tick 的
-回看窗口重叠 599/600），推理则覆盖全部 tick 并回写统一缓存 cache/<symbol>.npz 的
-preds 块（控制器状态特征，5.4），最后在 val/test 上评估写 runs_dir/metrics.json。
+训练集跨标的池化 fit、验证集早停；训练、评估与推理行均为统一缓存的分钟锚点行，
+预测回写 cache/<symbol>.npz 的 preds 块（控制器状态特征，5.4），最后在 val/test
+上评估写 runs_dir/metrics.json。
 ensure_predictions 为幂等预建入口，strategy/backtest.py 在回放前无条件调用；
 RL 训练（control.train）只读预测缓存、不在此重训。
 """
@@ -34,19 +34,19 @@ def _with_symbol(features, index: int):
         [features, np.full(len(features), index, dtype=np.float32)]).astype(np.float32)
 
 
-def symbol_rows(entry: dict, dates, stride: int) -> tuple:
-    """单标的的 (窗口特征 (n,47), 目标 (n,5)) 有效行，逐日每 stride 个 tick 取一行。
+def symbol_rows(entry: dict, dates) -> tuple:
+    """单标的的 (窗口特征 (n,47), 目标 (n,5)) 有效行（分钟锚点行）。
 
     行过滤口径：5 目标全有限 ∧ 任一窗口特征有限；窗口特征保留 NaN（LightGBM 原生处理）。
     """
     take = np.isin(entry["dates"], list(dates))
-    feats = entry["features"][take][:, ::stride].reshape(-1, len(FEATURE_NAMES))
-    targs = entry["targets"][take][:, ::stride].reshape(-1, len(TARGET_NAMES))
+    feats = entry["features"][take].reshape(-1, len(FEATURE_NAMES))
+    targs = entry["targets"][take].reshape(-1, len(TARGET_NAMES))
     valid = np.isfinite(targs).all(axis=1) & np.isfinite(feats).any(axis=1)
     return feats[valid], targs[valid]
 
 
-def training_rows(banks: dict, date_set: dict, stride: int) -> tuple:
+def training_rows(banks: dict, date_set: dict) -> tuple:
     """跨标的池化组装 (x (n,48) f32, y (n,5) f32)：symbol_id 为排序后标的集合中的索引。
 
     banks: {标的: load_cache(zero_nan=False) 的返回}；
@@ -54,7 +54,7 @@ def training_rows(banks: dict, date_set: dict, stride: int) -> tuple:
     """
     xs, ys = [], []
     for index, symbol in enumerate(sorted(banks)):
-        feats, targs = symbol_rows(banks[symbol], date_set[symbol], stride)
+        feats, targs = symbol_rows(banks[symbol], date_set[symbol])
         xs.append(_with_symbol(feats, index))
         ys.append(targs)
     return np.concatenate(xs), np.concatenate(ys).astype(np.float32)
@@ -68,7 +68,6 @@ def data_hash(symbols, cfg: Config) -> str:
         "source": {symbol: symbol_source_signature(cfg.data_dir, symbol)
                    for symbol in sorted(symbols)},
         "window": dataclasses.asdict(cfg.window),
-        "stride_ticks": cfg.stride_ticks,
         "split_ratios": SPLIT_RATIOS,
         "seed": cfg.seed,
         "model_kwargs": cfg.model_kwargs,
@@ -129,8 +128,7 @@ def _plot_test_rows(banks, splits, symbols, model, cfg: Config) -> None:
 
     xs, ys, ids = [], [], []
     for index, symbol in enumerate(symbols):
-        feats, targs = symbol_rows(banks[symbol], set(splits[symbol].test),
-                                   cfg.stride_ticks)
+        feats, targs = symbol_rows(banks[symbol], set(splits[symbol].test))
         xs.append(_with_symbol(feats, index))
         ys.append(targs)
         ids.append(np.full(len(feats), index, dtype=np.int64))
@@ -154,8 +152,8 @@ def train(cfg: Config, plot: bool = False) -> Path:
               for symbol in symbols}
     digest = data_hash(symbols, cfg)
 
-    train_x, train_y = training_rows(banks, _date_sets(splits, "train"), cfg.stride_ticks)
-    val_x, val_y = training_rows(banks, _date_sets(splits, "val"), cfg.stride_ticks)
+    train_x, train_y = training_rows(banks, _date_sets(splits, "train"))
+    val_x, val_y = training_rows(banks, _date_sets(splits, "val"))
     model = Model(seed=cfg.seed, data_hash=digest, model_kwargs=cfg.model_kwargs)
     print(f"train: {train_x.shape} | validation: {val_x.shape}", flush=True)
     started = time.time()
@@ -173,7 +171,6 @@ def train(cfg: Config, plot: bool = False) -> Path:
             "symbols": symbols,
             "seed": cfg.seed,
             "window": dataclasses.asdict(cfg.window),
-            "stride_ticks": cfg.stride_ticks,
             "split_ratios": SPLIT_RATIOS,
             "model_kwargs": cfg.model_kwargs,
             "feature_names": FEATURE_NAMES,
@@ -185,19 +182,19 @@ def train(cfg: Config, plot: bool = False) -> Path:
             "baseline": baseline,
         }, file, indent=1)
 
-    # 推理覆盖全部 tick：控制器在任一 tick 决策时都能读到当拍预测
+    # 推理覆盖全部分钟锚点行：控制器在任一决策锚点都能读到当拍预测
     for index, symbol in enumerate(symbols):
         entry = banks[symbol]
-        days, ticks = entry["features"].shape[:2]
+        days, minutes = entry["features"].shape[:2]
         feats = entry["features"].reshape(-1, len(FEATURE_NAMES))
-        preds = model.predict(_with_symbol(feats, index)).reshape(days, ticks, -1)
-        # 回看窗口未完整的行没有特征，不留预测（NaN；控制器侧按 0 读）
-        preds[~np.isfinite(feats).any(axis=1).reshape(days, ticks)] = np.nan
+        preds = model.predict(_with_symbol(feats, index)).reshape(days, minutes, -1)
+        # 回看窗口未完整或无锚点的行没有特征，不留预测（NaN；控制器侧按 0 读）
+        preds[~np.isfinite(feats).any(axis=1).reshape(days, minutes)] = np.nan
         write_predictions(symbol, preds, digest, cache_dir=cfg.cache_dir)
 
     metrics = {"data_hash": digest, "symbols": symbols, "baseline": baseline}
     for flag in ("val", "test"):
-        x, y = training_rows(banks, _date_sets(splits, flag), cfg.stride_ticks)
+        x, y = training_rows(banks, _date_sets(splits, flag))
         metrics[flag] = forecast_metrics(model.predict(x), y, baseline, TARGET_NAMES)
         print(f"{flag}: {metrics[flag]['samples']} 行 | "
               f"MAE {metrics[flag]['mean_mae']:.6g} | "

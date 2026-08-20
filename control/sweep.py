@@ -1,19 +1,20 @@
 """control 超参数一次一因子探索（python -m control.sweep）。
 
 以 Config 默认值为中心点，SWEEP_LADDERS 的每个参数沿梯子单独变动、其余保持默认，
-覆盖网络结构、优化、SMDP 口径（超时 K 与折扣 γ）、奖励塑形（w、λ）与目标网络、优先级回放。
-方法固定为完整 GRID，切分、训练与选模协议与 control.train 一致；比较判据为验证集 SR，
-测试指标仅随表报告、不参与选值。一次一因子忽略参数间交互，定位是围绕默认配置的
-敏感性分析而非全局寻优；w、λ 的正式选参仍走 design 7.1 的梯子协议。
+覆盖网络结构、优化、折扣、奖励塑形（w、λ）与目标网络、优先级回放。方法固定为
+完整 GRID，作业为统一训练（内含全部标的），切分、训练与选模协议与 control.train
+一致；比较判据为验证集 SR（逐标的等权聚合），测试指标仅随表报告、不参与选值。
+一次一因子忽略参数间交互，定位是围绕默认配置的敏感性分析而非全局寻优；
+w、λ 的正式选参仍走 design 7.1 的梯子协议。
 
-作业为 (标的, 参数, 值, 种子)，全部梯子共用同一中心点作业；结果写
-control/runs/sweep/<symbol>/<参数>_<值>_seed<k>.json（中心点为 default_seed<k>.json），
+作业为 (参数, 值, 种子)，全部梯子共用同一中心点作业；结果写
+control/runs/sweep/<参数>_<值>_seed<k>.json（中心点为 default_seed<k>.json），
 已存在的作业自动跳过（断点续跑），每个作业对应一个 wandb run（job_type "sweep"，
 config 含 param/value）。作业完成后按验证集 SR 汇总各梯子，写 sweep/summary.csv。
 
 --combo PARAM=VALUE ... 为组合确认模式：只训练中心点与给定组合（多参数同改，值不必
-落在梯子上），配合 --seeds 按 (标的, 种子) 配对对照——验证一次一因子结论叠加后是否
-仍成立，或探查梯子之外的单点。
+落在梯子上），配合 --seeds 按种子配对对照——验证一次一因子结论叠加后是否仍成立，
+或探查梯子之外的单点。
 """
 
 from __future__ import annotations
@@ -35,8 +36,8 @@ from .config import Config
 from .env import action_params
 from .model import resolve_device
 from .tracking import Tracker
-from .train import (build_split_markets, default_workers, evaluate,
-                    load_symbol_cache, save_result, train_agent)
+from .train import (METRICS, build_split_markets, default_workers,
+                    evaluate_pooled, load_symbol_cache, save_result, train_agent)
 
 # 每个参数一条梯子（含 Config 默认值即中心点），一次只变动一个参数
 SWEEP_LADDERS: dict[str, tuple] = {
@@ -47,18 +48,15 @@ SWEEP_LADDERS: dict[str, tuple] = {
     # 优化
     "lr": (3e-5, 1e-4, 3e-4),
     "batch_size": (32, 64, 128),
-    # SMDP：决策超时 K 与每 tick 折扣
-    "timeout_ticks": (50, 100, 200),
-    "gamma": (0.999, 0.9995, 0.9999),
+    # 每分钟折扣（TD 折扣为 gamma^decision_interval_min）
+    "gamma": (0.98, 0.99, 0.995),
     # 奖励塑形（design 6.2 的偏好参数）
     "hindsight_weight": (0.05, 0.1, 0.2),
     "inventory_lambda": (1.0, 3.0, 10.0),
     # 目标网络与优先级回放
-    "target_sync": (250, 500, 1000),
+    "target_sync": (1000, 2000, 4000),
     "per_alpha": (0.4, 0.6, 0.8),
 }
-
-METRICS = ("TR", "SR", "CR", "SoR")
 
 
 def job_stem(job: dict) -> str:
@@ -73,16 +71,15 @@ def job_stem(job: dict) -> str:
 
 
 def _result_path(cfg: Config, job: dict) -> str:
-    return os.path.join(cfg.runs_dir, "sweep", job["symbol"], job_stem(job) + ".json")
+    return os.path.join(cfg.runs_dir, "sweep", job_stem(job) + ".json")
 
 
-def make_jobs(symbols: list[str], seeds: tuple[int, ...], params: list[str]) -> list[dict]:
-    """展开 (标的 × 参数 × 非默认档 × 种子) 作业矩阵，外加共享的中心点作业。"""
+def make_jobs(seeds: tuple[int, ...], params: list[str]) -> list[dict]:
+    """展开 (参数 × 非默认档 × 种子) 作业矩阵，外加共享的中心点作业。"""
     defaults = Config()
-    jobs = [{"symbol": s, "param": None, "value": None, "seed": k}
-            for s in symbols for k in seeds]
-    jobs += [{"symbol": s, "param": param, "value": value, "seed": k}
-             for s in symbols for param in params
+    jobs = [{"param": None, "value": None, "seed": k} for k in seeds]
+    jobs += [{"param": param, "value": value, "seed": k}
+             for param in params
              for value in SWEEP_LADDERS[param] if value != getattr(defaults, param)
              for k in seeds]
     return jobs
@@ -101,17 +98,17 @@ def parse_combo(items: list[str]) -> dict:
     return dict(sorted(overrides.items()))
 
 
-def make_combo_jobs(symbols: list[str], seeds: tuple[int, ...], overrides: dict) -> list[dict]:
-    """组合确认的作业矩阵：每个 (标的, 种子) 一个中心点作业加一个组合作业。"""
-    return [{"symbol": s, "param": param, "value": value, "seed": k}
-            for s in symbols for k in seeds
+def make_combo_jobs(seeds: tuple[int, ...], overrides: dict) -> list[dict]:
+    """组合确认的作业矩阵：每个种子一个中心点作业加一个组合作业。"""
+    return [{"param": param, "value": value, "seed": k}
+            for k in seeds
             for param, value in ((None, None), ("combo", overrides))]
 
 
 def run_job(job: dict, cfg: Config) -> str:
-    symbol, seed = job["symbol"], job["seed"]
+    seed = job["seed"]
     out = _result_path(cfg, job)
-    label = f"{symbol}/{job_stem(job)}"
+    label = job_stem(job)
     if os.path.exists(out):
         return f"skip {label}"
     if job["param"] == "combo":
@@ -119,20 +116,19 @@ def run_job(job: dict, cfg: Config) -> str:
     elif job["param"] is not None:
         cfg = replace(cfg, **{job["param"]: job["value"]})
     t0 = time.time()
-    markets = build_split_markets(symbol, cfg)
-    tracker = Tracker(cfg, job_stem(job), {"symbol": symbol, "method": "sweep",
-                                           "param": job["param"], "value": job["value"],
-                                           "seed": seed})
+    markets, _ = build_split_markets(cfg)
+    tracker = Tracker(cfg, label, {"method": "sweep", "param": job["param"],
+                                   "value": job["value"], "seed": seed})
     try:
-        agent, log = train_agent(cfg, markets["train"], markets["val"], seed=seed,
-                                 log_prefix=f"[{label}]", tracker=tracker)
-        payload = {**evaluate(markets["test"],
-                              lambda obs: action_params(cfg, agent.greedy(obs))),
-                   "train_log": log}
+        agent, log = train_agent(cfg, markets, seed=seed, log_prefix=f"[{label}]",
+                                 tracker=tracker)
+        test = evaluate_pooled(markets["test"],
+                               lambda obs: action_params(cfg, agent.greedy(obs)))
+        payload = {**test["pooled"], "per_symbol": test["per_symbol"], "train_log": log}
         tracker.log_test(payload)
     finally:
         tracker.finish()  # 失败路径也要收尾，否则进程池复用本进程时下个作业会并入未关闭的 run
-    payload.update({"symbol": symbol, "param": job["param"], "value": job["value"],
+    payload.update({"param": job["param"], "value": job["value"],
                     "seed": seed, "elapsed_sec": round(time.time() - t0, 1)})
     save_result(out, payload)
     return (f"done {label} val_SR={log['best_val_SR']:.3f} "
@@ -142,17 +138,17 @@ def run_job(job: dict, cfg: Config) -> str:
 def load_rows(sweep_dir: str) -> pd.DataFrame:
     """逐作业结果行；中心点的 param/value 记缺失，val_SR 为训练日志的选模最优。"""
     rows = []
-    for path in sorted(glob.glob(os.path.join(sweep_dir, "*", "*.json"))):
+    for path in sorted(glob.glob(os.path.join(sweep_dir, "*.json"))):
         with open(path, encoding="utf-8") as f:
             r = json.load(f)
-        rows.append({"symbol": r["symbol"], "param": r["param"], "value": r["value"],
+        rows.append({"param": r["param"], "value": r["value"],
                      "seed": r["seed"], "val_SR": r["train_log"]["best_val_SR"],
                      **{k: r[k] for k in METRICS}})
     return pd.DataFrame(rows)
 
 
 def sweep_table(df: pd.DataFrame, params: list[str]) -> pd.DataFrame:
-    """各梯子的档位对比：中心点并入每个参数的默认档（值后缀 *），跨标的与种子取均值。"""
+    """各梯子的档位对比：中心点并入每个参数的默认档（值后缀 *），跨种子取均值。"""
     defaults = Config()
     center = df[df["param"].isna()]
     blocks = []
@@ -171,14 +167,13 @@ def sweep_table(df: pd.DataFrame, params: list[str]) -> pd.DataFrame:
 
 
 def combo_table(df: pd.DataFrame, overrides: dict) -> tuple[pd.DataFrame, int, int]:
-    """组合与中心点按 (标的, 种子) 配对的对照，返回（对照表, 配对数, 组合占优数）。
+    """组合与中心点按种子配对的对照，返回（对照表, 配对数, 组合占优数）。
 
     末行为配对差（组合 − 中心点）的均值；对照只计两侧都已完成的配对。
     """
-    keys = ["symbol", "seed"]
-    center = df[df["param"].isna()].set_index(keys)
+    center = df[df["param"].isna()].set_index("seed")
     combo = df[df["param"] == "combo"]
-    combo = combo[combo["value"].apply(lambda v: v == overrides)].set_index(keys)
+    combo = combo[combo["value"].apply(lambda v: v == overrides)].set_index("seed")
     shared = center.index.intersection(combo.index)
     center, combo = center.loc[shared], combo.loc[shared]
     columns = ["val_SR", *METRICS]
@@ -216,8 +211,8 @@ def main() -> None:
         combo = parse_combo(args.combo) if args.combo else None
     except ValueError as exc:
         p.error(str(exc))
-    jobs = (make_combo_jobs(symbols, tuple(args.seeds), combo) if combo
-            else make_jobs(symbols, tuple(args.seeds), args.params))
+    jobs = (make_combo_jobs(tuple(args.seeds), combo) if combo
+            else make_jobs(tuple(args.seeds), args.params))
     pending = [j for j in jobs if not os.path.exists(_result_path(cfg, j))]
     print(f"sweep jobs: {len(jobs)} total, {len(pending)} pending; "
           f"device={resolve_device(cfg)} workers={workers}", flush=True)

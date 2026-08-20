@@ -1,6 +1,7 @@
-"""分支 Q 智能体：ε-greedy 决策、SMDP 折扣的 TD 更新、目标网络。
+"""分支 Q 智能体：ε-greedy 决策、定长区间折扣的 TD 更新、目标网络。
 
-决策间隔 τ 由市场决定，故延续价值的折扣为 gamma^τ（gamma 为每 tick 口径，见 design 4.2）。
+决策区间定长（decision_interval_min），TD 折扣恒为 gamma^decision_interval_min
+（design 4.2）。数量档收缩为单档时网络只有半宽分支，动作元组的数量档恒为 0。
 """
 
 from __future__ import annotations
@@ -23,9 +24,9 @@ def _branching_next_value(
 ) -> torch.Tensor:
     """以在线网络选动作、目标网络估值，并聚合有效的动作分支。
 
-    半宽分支（分支 0）选择网格不触发档（平仓 / 关闭）时，数量分支对执行无意义，
-    延续价值只取半宽分支（design 6.3）；平仓档只在下一状态净持仓非零时可选，
-    动作选择与行为策略遵循同一掩码（design 5.1）。
+    平仓档只在下一状态净持仓非零时可选，动作选择与行为策略遵循同一掩码
+    （design 5.1）。数量分支存在时（多档配置），半宽分支选择网格不触发档
+    （平仓 / 关闭）则数量分支对执行无意义，延续价值只取半宽分支（design 6.3）。
     """
     q0 = online_q[0].clone()
     q0[~flatten_allowed, 0] = -torch.inf
@@ -40,6 +41,8 @@ def _branching_next_value(
             )
         actions.append(action.squeeze(1))
         values.append(tq.gather(1, action).squeeze(1))
+    if len(values) == 1:
+        return values[0]
     branch_values = torch.stack(values)
     joint = branch_values.mean(0)
     inactive = torch.isin(
@@ -74,17 +77,19 @@ class BranchQAgent:
 
     # ---- 决策 ----
     def _apply_fixed(self, gears: list[int]) -> tuple[int, int]:
-        for i, fixed in enumerate(self.fixed_gears):
+        for i, fixed in enumerate(self.fixed_gears[: len(gears)]):
             if fixed is not None:
                 gears[i] = fixed
-        return gears[0], gears[1]
+        return gears[0], gears[1] if len(gears) > 1 else 0
 
     def act(self, obs: Observation, epsilon: float) -> tuple[int, int]:
         if self.rng.random() < epsilon:
             # 平仓档（半宽档 0）只在净持仓非零时可选，探索与贪心遵循同一掩码
             lo = 0 if obs.flatten_allowed else 1
-            return self._apply_fixed([int(self.rng.integers(lo, self.cfg.n_width)),
-                                      int(self.rng.integers(self.cfg.n_size))])
+            gears = [int(self.rng.integers(lo, self.cfg.n_width))]
+            if self.cfg.n_size > 1:
+                gears.append(int(self.rng.integers(self.cfg.n_size)))
+            return self._apply_fixed(gears)
         return self.greedy(obs)
 
     def greedy(self, obs: Observation) -> tuple[int, int]:
@@ -121,10 +126,6 @@ class BranchQAgent:
             rewards = torch.as_tensor(
                 [tr.reward for tr in batch], dtype=torch.float32, device=self.device
             )
-            # SMDP 折扣：区间跨 τ 个 tick，权重为每 tick 折扣的 τ 次幂
-            discount = torch.as_tensor(
-                [cfg.gamma**tr.tau for tr in batch], dtype=torch.float32, device=self.device
-            )
             next_value = torch.zeros(len(batch), device=self.device)
             keep = [i for i, o in enumerate(next_obs) if o is not None]
             if keep:
@@ -140,18 +141,24 @@ class BranchQAgent:
                     online_q, target_q, self.fixed_gears, self.inactive_gears,
                     flatten_allowed
                 )
-            target = rewards + discount * next_value
+            # 定长区间：TD 折扣为常数 gamma^decision_interval_min（design 4.2）
+            target = rewards + cfg.td_discount * next_value
 
         w = torch.as_tensor(weights, device=self.device)
         td = [target - qs for qs in q_sel]
-        # 半宽分支恒有效；数量分支仅在网格可触发（非平仓 / 关闭档）时参与更新
-        active = ~torch.isin(
-            actions[:, 0],
-            torch.as_tensor(list(self.inactive_gears), device=self.device),
-        )
-        masks = [torch.ones_like(active), active]
-        n_active = 1.0 + active.float()
-        sample_loss = sum(mask * error**2 for mask, error in zip(masks, td)) / n_active
+        if len(td) == 1:
+            sample_loss = td[0] ** 2
+            priorities = td[0].abs()
+        else:
+            # 半宽分支恒有效；数量分支仅在网格可触发（非平仓 / 关闭档）时参与更新
+            active = ~torch.isin(
+                actions[:, 0],
+                torch.as_tensor(list(self.inactive_gears), device=self.device),
+            )
+            masks = [torch.ones_like(active), active]
+            n_active = 1.0 + active.float()
+            sample_loss = sum(mask * error**2 for mask, error in zip(masks, td)) / n_active
+            priorities = sum(mask * error.abs() for mask, error in zip(masks, td)) / n_active
         q_loss = (w * sample_loss).mean()
 
         self.optimizer.zero_grad()
@@ -159,10 +166,7 @@ class BranchQAgent:
         torch.nn.utils.clip_grad_norm_(self.online.parameters(), cfg.grad_clip)
         self.optimizer.step()
 
-        priorities = (
-            sum(mask * error.abs() for mask, error in zip(masks, td)) / n_active
-        ).detach().cpu().numpy()
-        self.buffer.update_priorities(idx, priorities)
+        self.buffer.update_priorities(idx, priorities.detach().cpu().numpy())
 
         self.updates += 1
         if self.updates % cfg.target_sync == 0:

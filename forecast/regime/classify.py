@@ -1,8 +1,8 @@
 """模式识别模型：LightGBM 二分类 P(网格不利模式 | 47 维窗口特征 + symbol_id)。
 
-识别质量以 AUC / AP 对着事后标签评估，与策略盈亏解耦。行采样与标签同口径：
-逐日每 stride 一行、特征任一维有限、标签可判定（>= 0）。推理在 stride 网格上
-进行并前向填充到全 tick（决策节奏本就是每 stride 一拍，前向填充保持因果性）。
+识别质量以 AUC / AP 对着事后标签评估，与策略盈亏解耦。行口径与标签一致：
+分钟锚点行、特征任一维有限、标签可判定（>= 0）。推理同在锚点行上进行，
+门控使用方按锚点前向填充到 tick（regime.data.expand_minutes，保持因果性）。
 """
 
 from __future__ import annotations
@@ -15,7 +15,6 @@ import numpy as np
 
 from data_provider.windows import FEATURE_NAMES
 
-from forecast.regime.config import RegimeConfig
 from forecast.regime.data import SymbolBank
 
 SYMBOL_FEATURE = "symbol_id"
@@ -90,14 +89,13 @@ class Classifier:
         return self
 
 
-def symbol_rows(bank: SymbolBank, labels: np.ndarray, flag: str, symbol_id: int,
-                cfg: RegimeConfig) -> tuple:
-    """单标的某切分段的 (x (n,48) f32, y (n,) int8) stride 行。"""
-    grid = np.arange(0, bank.features.shape[1], cfg.stride_ticks)
+def symbol_rows(bank: SymbolBank, labels: np.ndarray, flag: str,
+                symbol_id: int) -> tuple:
+    """单标的某切分段的 (x (n,48) f32, y (n,) int8) 分钟锚点行。"""
     xs, ys = [], []
     for i in bank.day_indices(flag):
-        feats = bank.features[i, grid]
-        label = labels[i, grid]
+        feats = bank.features[i]
+        label = labels[i]
         ok = (label >= 0) & np.isfinite(feats).any(axis=1)
         xs.append(feats[ok])
         ys.append(label[ok])
@@ -108,27 +106,25 @@ def symbol_rows(bank: SymbolBank, labels: np.ndarray, flag: str, symbol_id: int,
                                   else np.empty(0, dtype=np.int8))
 
 
-def pooled_rows(banks: dict, labels: dict, flag: str, cfg: RegimeConfig) -> tuple:
+def pooled_rows(banks: dict, labels: dict, flag: str) -> tuple:
     """跨标的池化 (x, y)；symbol_id 为排序后标的集合中的索引。"""
-    rows = [symbol_rows(banks[symbol], labels[symbol], flag, index, cfg)
+    rows = [symbol_rows(banks[symbol], labels[symbol], flag, index)
             for index, symbol in enumerate(sorted(banks))]
     return (np.concatenate([x for x, _ in rows]),
             np.concatenate([y for _, y in rows]))
 
 
 def day_prob(classifier: Classifier, bank: SymbolBank, day_index: int,
-             symbol_id: int, cfg: RegimeConfig) -> np.ndarray:
-    """单日全 tick 概率：stride 网格上推理后前向填充；无特征拍记 NaN。"""
-    n_ticks = bank.features.shape[1]
-    grid = np.arange(0, n_ticks, cfg.stride_ticks)
-    feats = bank.features[day_index, grid]
+             symbol_id: int) -> np.ndarray:
+    """单日逐分钟概率 (M,)：锚点行上推理；无特征的分钟记 NaN。"""
+    feats = bank.features[day_index]
     ok = np.isfinite(feats).any(axis=1)
-    prob = np.full(len(grid), np.nan)
+    prob = np.full(len(feats), np.nan)
     if ok.any():
         x = np.column_stack([feats[ok],
                              np.full(ok.sum(), symbol_id, dtype=np.float32)])
         prob[ok] = classifier.predict(x)
-    return np.repeat(prob, cfg.stride_ticks)[:n_ticks]
+    return prob
 
 
 def calibrate_threshold(probabilities, labels) -> float:

@@ -1,9 +1,10 @@
-"""模型：多模态市场编码器 + 标的 embedding + 分支 Q 网络。
+"""模型：多模态市场编码器 + 标的 embedding + dueling Q 网络。
 
   (a) 微观编码器：LOB 序列与私有状态序列各经一层 LSTM，取末隐状态拼接；
   (b) 宏观编码器：bar 级相对指标与窗口统计、LightGBM 预测向量经 MLP；
   (c) 标的标识：symbol_id 经 embedding 拼接进市场嵌入（统一训练时区分标的）；
-  (d) 动作分支：共享状态价值 V 与半宽 / 数量两支优势函数聚合为 Q 值。
+  (d) 动作头：共享状态价值 V 与半宽优势聚合为 Q 值；数量档收缩为单档时仅有
+      半宽分支（输出 7+1），恢复多档配置时按分支结构扩展数量优势头（design 5.1）。
 """
 
 from __future__ import annotations
@@ -54,7 +55,7 @@ class MarketEncoder(nn.Module):
 
 
 class BranchQNetwork(nn.Module):
-    """分支 Q 网络：共享状态价值 + 半宽 / 数量两支优势。"""
+    """dueling Q 网络：共享状态价值 + 半宽优势；数量多档时另加数量优势分支。"""
 
     def __init__(self, cfg: Config):
         super().__init__()
@@ -62,8 +63,9 @@ class BranchQNetwork(nn.Module):
         d = self.encoder.embed_dim
         self.trunk = nn.Sequential(nn.Linear(d, cfg.trunk_hidden), nn.ReLU())
         self.value_head = nn.Linear(cfg.trunk_hidden, 1)
+        branches = (cfg.n_width,) if cfg.n_size == 1 else (cfg.n_width, cfg.n_size)
         self.branch_heads = nn.ModuleList(
-            nn.Linear(cfg.trunk_hidden, n) for n in (cfg.n_width, cfg.n_size)
+            nn.Linear(cfg.trunk_hidden, n) for n in branches
         )
 
     def forward(

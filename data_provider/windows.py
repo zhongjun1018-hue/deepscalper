@@ -1,17 +1,18 @@
 """标的统一缓存：47 维回看特征、5 维前瞻目标与 5 维预测的唯一构建 / 读写入口。
 
-行索引即 tick 索引：行 t 的输入窗口为当日第 t−L+1 至 t 条快照（L=lookback），
-前瞻目标覆盖 (t, t+H]（H=pred），因此任一 tick 都可作为决策点、直接取第 t 行。
-回看窗口不完整的行（t<L−1）与前瞻越界的行（t+H 超出当日末快照）记 NaN；缓存按标的
-单日最大快照数对齐，尾部行同样记 NaN。
+行索引即压缩分钟索引（0..236，data_provider/ticks.py 的分钟网格）：每分钟的末快照为
+该分钟的锚点 tick，行 m 的输入窗口为锚点前 lookback_min 分钟内的全部快照（tick 数随
+快照密度变长），前瞻目标覆盖锚点之后 pred_min 分钟的路径。回看窗口不完整的行
+（m<lookback_min−1）与前瞻越界的行记 NaN；无快照的分钟不设锚点行（anchor_ticks 记
+-1、特征与目标记 NaN），使用方按锚点前向填充。
 
 依赖方向说明：特征/标签构建依赖网格引擎回放（data_provider → strategy）是既有设计。
 
 cache/<symbol>.npz 为 forecast 与 control 共用的单一缓存，不按任务拆分：窗口块
-{dates, features, targets, width} 由本模块构建，preds 先置 NaN，forecast.train
-训练后经 write_predictions 回写。metadata 的窗口级字段（schema、源文件签名、窗口
-参数、FEATURE_NAMES / TARGET_NAMES）任一变化即整体重建，预测块随之失效并由
-forecast.train.ensure_predictions 重训回写。
+{dates, features, targets, width, anchor_ticks} 由本模块构建，preds 先置 NaN，
+forecast.train 训练后经 write_predictions 回写。metadata 的窗口级字段（schema、
+源文件签名、窗口参数、FEATURE_NAMES / TARGET_NAMES）任一变化即整体重建，预测块
+随之失效并由 forecast.train.ensure_predictions 重训回写。
 """
 
 from __future__ import annotations
@@ -22,22 +23,22 @@ from dataclasses import asdict, dataclass
 
 import numpy as np
 import pandas as pd
-from numpy.lib.stride_tricks import sliding_window_view
 
-from data_provider.ticks import (load_days, symbol_source_signature,
+from data_provider.ticks import (MINUTES_PER_DAY, anchor_ffill, load_days,
+                                 minute_anchors, symbol_source_signature,
                                  top_order_share)
 from strategy import engine as grid_engine
 from strategy.width import daily_bars, grid_width
 
-CACHE_SCHEMA = 8
+CACHE_SCHEMA = 9
 
 
 @dataclass(frozen=True)
 class WindowSpec:
     """缓存口径的唯一来源：forecast 与 control 的 Config 均内嵌本规格，避免双份参数漂移。"""
-    lookback_ticks: int = 600    # 回看窗口（tick）
-    pred_ticks: int = 300        # 前瞻窗口（tick）
-    bar_ticks: int = 20          # 聚合 bar 长度：当前 bar 量能与 bar 边界跳空（tick）
+    lookback_min: int = 30       # 回看窗口（墙钟分钟）
+    pred_min: int = 15           # 前瞻窗口（墙钟分钟）
+    bar_min: int = 1             # 聚合 bar 长度：当前 bar 量能与 bar 边界跳空（分钟）
     atr_mult: float = 0.1        # 网格固定半宽 = atr_mult × ATR
     atr_window: int = 3          # ATR 回溯的完整交易日数
     min_width_ratio: float = 1e-3  # 半宽下限（相对价格）
@@ -57,7 +58,7 @@ DAY_NAMES = ["rel_day_open", "vol_rel", "dist_up", "dist_dn", "range_pos", "day_
 GRID_NAMES = ["buy_count", "sell_count", "abs_exposure"]
 FEATURE_NAMES = PRICE_NAMES + PATH_NAMES + TRADE_NAMES + BOOK_NAMES + DAY_NAMES + GRID_NAMES
 TARGET_NAMES = ["path_len", "rv", "range_rel", "resid_abs_q90", "abs_slope"]
-CACHE_ARRAYS = ["dates", "features", "targets", "preds", "width"]
+CACHE_ARRAYS = ["dates", "features", "targets", "preds", "width", "anchor_ticks"]
 
 
 def _divide(numerator, denominator):
@@ -281,26 +282,35 @@ def _book_features(context, start, end, window_volume):
     ]
 
 
-def _day_features(context, end, day_start, day_end, bar_ticks):
-    """日内状态：只用窗口末快照（end-1）及其之前的数据；bar 为行末 bar_ticks 条快照。"""
+def _day_features(context, end, day_start, day_end, bar_start, minutes_elapsed, bar_min):
+    """日内状态：只用窗口末快照（end-1）及其之前的数据。
+
+    bar 为行末 bar_min 分钟内的快照，bar_start 为上一 bar 边界（前一 bar 末分钟的
+    锚点 tick，绝对索引）；边界不存在（bar 之前当日无快照）时 bar 量能与跳空记 NaN。
+    """
     tail = end - 1
     log_mid = context.log_mid[tail]
-    bar_volume = context.volume[tail] - context.volume[tail - bar_ticks]
-    elapsed_volume = context.volume[tail] - context.volume[day_start]
-    average_volume = elapsed_volume * bar_ticks / (tail - day_start + 1.0)
+    if bar_start >= day_start:
+        bar_volume = context.volume[tail] - context.volume[bar_start]
+        elapsed_volume = context.volume[tail] - context.volume[day_start]
+        average_volume = elapsed_volume * bar_min / minutes_elapsed
+        vol_rel = bar_volume / average_volume if average_volume != 0 else np.nan
+        gap = context.log_mid[bar_start + 1] - context.log_mid[bar_start]
+    else:
+        vol_rel = gap = np.nan
     high, low = context.high_px[tail], context.low_px[tail]
     latest = context.lastpx[tail]
     range_position = (np.clip((latest - low) / (high - low), 0.0, 1.0)
                       if high != low else 0.5)
     return [
         log_mid - np.log(_positive(context.open_px[tail])),
-        bar_volume / average_volume if average_volume != 0 else np.nan,
+        vol_rel,
         np.log(_positive(context.max_px[tail])) - log_mid,
         log_mid - np.log(_positive(context.min_px[tail])),
         range_position,
         (tail - day_start) / (day_end - day_start - 1.0),
         float(context.afternoon[tail]),
-        context.log_mid[tail - bar_ticks + 1] - context.log_mid[tail - bar_ticks],
+        gap,
     ]
 
 
@@ -318,7 +328,8 @@ def grid_counts(bid1, ask1, log_mid, width):
     return np.array([buys, sells, abs(buys - sells)], dtype=np.float64)
 
 
-def _window_features(context, start, end, day_start, day_end, bar_ticks, width):
+def _window_features(context, start, end, day_start, day_end, bar_start,
+                     minutes_elapsed, bar_min, width):
     path = context.log_mid[start:end]
     stats = path_stats(path)
     window_volume = context.volume[end - 1] - context.volume[start]
@@ -326,39 +337,22 @@ def _window_features(context, start, end, day_start, day_end, bar_ticks, width):
     columns += [stats[name][0] for name in PATH_NAMES]
     columns += _trade_features(context, start, end)
     columns += _book_features(context, start, end, window_volume)
-    columns += _day_features(context, end, day_start, day_end, bar_ticks)
+    columns += _day_features(context, end, day_start, day_end, bar_start,
+                             minutes_elapsed, bar_min)
     columns += grid_counts(context.bid1[start:end], context.ask1[start:end],
                            path, width).tolist()
     return np.asarray(columns, dtype=np.float64)
 
 
-def _forward_targets(log_mid, invalid, lookback, pred_ticks):
-    """当日逐 tick 的前瞻目标 (N, 5)：行 t 的路径为 [t, t+H]。
-
-    路径统计量对全部滑窗一次算出；回看窗口不完整（t<L−1）、前瞻越界或路径含无效
-    快照的行记 NaN，有效行范围与特征一致。
-    """
-    n = len(log_mid)
-    targets = np.full((n, len(TARGET_NAMES)), np.nan)
-    rows = n - pred_ticks
-    if rows <= 0:
-        return targets
-    stats = path_stats(sliding_window_view(log_mid, pred_ticks + 1))
-    prefix = np.concatenate([[0], np.cumsum(invalid)])
-    usable = (prefix[pred_ticks + 1:] - prefix[:rows]) == 0
-    usable[:min(lookback - 1, rows)] = False
-    targets[:rows] = np.where(
-        usable[:, None], np.column_stack([stats[name] for name in TARGET_NAMES]), np.nan)
-    return targets
-
-
 def build_symbol(symbol: str, data_dir: str = "data",
                  spec: WindowSpec = WindowSpec()) -> dict:
-    """构建一个标的的统一缓存内容（行索引即 tick 索引）。
+    """构建一个标的的统一缓存内容（行索引即压缩分钟索引，0..236）。
 
-    返回 CACHE_ARRAYS 的全部数组：preds 置 NaN 待 forecast.train 回写，R 为该标的单日
-    最大快照数，窗口不完整、前瞻越界与尾部对齐的行均记 NaN。半宽取 strategy/width.py
-    的逐日 grid_width，历史不足的日期 width 记 nan，对应网格成交特征为 nan。
+    返回 CACHE_ARRAYS 的全部数组：preds 置 NaN 待 forecast.train 回写。每行的输入
+    窗口按墙钟取锚点前 lookback_min 分钟内的全部快照（tick 数变长），前瞻目标同理取
+    未来 pred_min 分钟的路径；窗口不完整、前瞻越界与无锚点的行记 NaN。半宽取
+    strategy/width.py 的逐日 grid_width，历史不足的日期 width 记 nan，对应网格成交
+    特征为 nan。
     """
     days = load_days(symbol, data_dir=data_dir, atr_days=spec.atr_window)
     if not days:
@@ -376,31 +370,46 @@ def build_symbol(symbol: str, data_dir: str = "data",
                 & np.isfinite(context.amount) & np.isfinite(context.trades))
     invalid_cumsum = np.concatenate([[0], np.cumsum(invalid)])
 
-    rows = int(counts.max())
     width_by_date = grid_width(daily_bars(frame), atr_mult=spec.atr_mult,
                                atr_window=spec.atr_window,
                                min_width_ratio=spec.min_width_ratio)
     width_by_date.index = width_by_date.index.astype(str)
     widths = np.array([width_by_date.get(date, np.nan) for date in dates], dtype=np.float64)
 
-    features = np.full((len(dates), rows, len(FEATURE_NAMES)), np.nan, dtype=np.float32)
-    targets = np.full((len(dates), rows, len(TARGET_NAMES)), np.nan, dtype=np.float32)
+    minutes = MINUTES_PER_DAY
+    features = np.full((len(dates), minutes, len(FEATURE_NAMES)), np.nan, dtype=np.float32)
+    targets = np.full((len(dates), minutes, len(TARGET_NAMES)), np.nan, dtype=np.float32)
+    anchor_ticks = np.full((len(dates), minutes), -1, dtype=np.int64)
     for date_index in range(len(dates)):
         day_start, day_end = day_offsets[date_index], day_offsets[date_index + 1]
-        day_ticks = day_end - day_start
-        targets[date_index, :day_ticks] = _forward_targets(
-            context.log_mid[day_start:day_end], invalid[day_start:day_end],
-            spec.lookback_ticks, spec.pred_ticks)
-        for t in range(spec.lookback_ticks - 1, day_ticks):
-            end = day_start + t + 1          # 窗口右开端，末快照即 tick t
-            start = end - spec.lookback_ticks
-            if invalid_cumsum[end] - invalid_cumsum[start] == 0:
-                features[date_index, t] = _window_features(
+        anchors = minute_anchors(frame.iloc[day_start:day_end])
+        filled = anchor_ffill(anchors)
+        anchor_ticks[date_index] = anchors
+        first_minute = int(np.argmax(anchors >= 0))
+        for m in range(spec.lookback_min - 1, minutes):
+            t = anchors[m]
+            if t < 0:
+                continue
+            # 特征：窗口为分钟 [m−L+1, m] 的全部快照（右开端 end 收于锚点）
+            previous = filled[m - spec.lookback_min] if m >= spec.lookback_min else -1
+            start = day_start + previous + 1
+            end = day_start + t + 1
+            if end - start >= 2 and invalid_cumsum[end] - invalid_cumsum[start] == 0:
+                bar_start = filled[m - spec.bar_min]
+                features[date_index, m] = _window_features(
                     context, start, end, day_start, day_end,
-                    spec.bar_ticks, widths[date_index])
+                    day_start + bar_start if bar_start >= 0 else -1,
+                    m - first_minute + 1, spec.bar_min, widths[date_index])
+            # 目标：锚点起未来 pred_min 分钟的路径 [t, e]
+            if m + spec.pred_min < minutes:
+                e = filled[m + spec.pred_min]
+                lo, hi = day_start + t, day_start + e + 1
+                if e > t and invalid_cumsum[hi] - invalid_cumsum[lo] == 0:
+                    stats = path_stats(context.log_mid[lo:hi])
+                    targets[date_index, m] = [stats[name][0] for name in TARGET_NAMES]
 
     return {"dates": dates.astype("U8"), "features": features, "targets": targets,
-            "width": widths.astype(np.float32),
+            "width": widths.astype(np.float32), "anchor_ticks": anchor_ticks,
             "preds": np.full_like(targets, np.nan)}
 
 
@@ -425,8 +434,9 @@ def load_cache(symbol: str, data_dir: str = "data", cache_dir: str = "cache",
                spec: WindowSpec = WindowSpec(), zero_nan: bool = True) -> dict:
     """加载标的统一缓存（缺失或窗口级 metadata 不匹配时重建）。
 
-    返回 {"dates": (D,), "features": (D,R,47), "targets": (D,R,5), "preds": (D,R,5),
-    "width": (D,)}，R 为该标的单日最大快照数、行索引即 tick 索引；preds 在
+    返回 {"dates": (D,), "features": (D,M,47), "targets": (D,M,5), "preds": (D,M,5),
+    "width": (D,), "anchor_ticks": (D,M)}，M 为压缩分钟数（237）、行索引即分钟索引，
+    anchor_ticks 为各分钟末快照的当日 tick 索引（无快照记 -1）；preds 在
     forecast.train 回写前全为 NaN。zero_nan=False 保留 NaN（LightGBM 原生处理缺失），
     True 时置 0（进控制器状态：神经网络不接受 NaN）。
     """

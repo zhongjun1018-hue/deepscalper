@@ -38,7 +38,6 @@ def data_hash(symbols, cfg: RegimeConfig) -> str:
         "source": {symbol: symbol_source_signature(cfg.data_dir, symbol)
                    for symbol in sorted(symbols)},
         "window": dataclasses.asdict(cfg.window),
-        "stride_ticks": cfg.stride_ticks,
         "split_ratios": SPLIT_RATIOS,
         "seed": cfg.seed,
         "pattern": [cfg.residual_ratio_threshold, cfg.slope_ratio_threshold,
@@ -70,8 +69,8 @@ def train(cfg: RegimeConfig) -> Path:
                for symbol, bank in banks.items()}
     digest = data_hash(symbols, cfg)
 
-    train_x, train_y = classify.pooled_rows(banks, pattern, "train", cfg)
-    val_x, val_y = classify.pooled_rows(banks, pattern, "val", cfg)
+    train_x, train_y = classify.pooled_rows(banks, pattern, "train")
+    val_x, val_y = classify.pooled_rows(banks, pattern, "val")
     classifier = classify.Classifier(seed=cfg.seed, data_hash=digest,
                                      model_kwargs=cfg.model_kwargs)
     print(f"train: {train_x.shape} | validation: {val_x.shape}", flush=True)
@@ -91,7 +90,6 @@ def train(cfg: RegimeConfig) -> Path:
             "symbols": symbols,
             "seed": cfg.seed,
             "window": dataclasses.asdict(cfg.window),
-            "stride_ticks": cfg.stride_ticks,
             "split_ratios": SPLIT_RATIOS,
             "pattern": {"residual_ratio_threshold": cfg.residual_ratio_threshold,
                         "slope_ratio_threshold": cfg.slope_ratio_threshold,
@@ -103,7 +101,7 @@ def train(cfg: RegimeConfig) -> Path:
 
     metrics = {"data_hash": digest, "symbols": symbols, "threshold": threshold,
                "val": recognition_metrics(val_prob, val_y)}
-    test_x, test_y = classify.pooled_rows(banks, pattern, "test", cfg)
+    test_x, test_y = classify.pooled_rows(banks, pattern, "test")
     metrics["test"] = recognition_metrics(classifier.predict(test_x), test_y)
     for flag in ("val", "test"):
         print(f"{flag}: {metrics[flag]['samples']} 行 | "

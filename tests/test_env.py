@@ -10,7 +10,7 @@ from synthetic import synthetic_day
 
 
 class ScanTest(unittest.TestCase):
-    """_scan：自 t+1 起扫描至触发或超时，返回（区间终点, 方向 +1 买 / −1 卖 / 0 超时）。"""
+    """_scan：在 (lo, hi] 内扫描首个触发，返回（触发 tick 或 hi, 方向 +1 买 / −1 卖 / 0 无）。"""
 
     def make_env(self):
         market = SimpleNamespace(
@@ -21,23 +21,22 @@ class ScanTest(unittest.TestCase):
         )
         env = object.__new__(TradingEnv)
         env.market = market
-        env.cfg = SimpleNamespace(timeout_ticks=3)
         return env
 
     def test_opposite_best_quote_triggers_fill(self):
         # 买一在 tick 1 上穿卖出线 → 卖出方向 −1
-        self.assertEqual(self.make_env()._scan(0, sell=100.5, buy=None), (1, -1))
+        self.assertEqual(self.make_env()._scan(0, 3, sell=100.5, buy=None), (1, -1))
 
     def test_ask_crossing_down_triggers_buy(self):
         # 卖一在 tick 2 下穿买入线 → 买入方向 +1
-        self.assertEqual(self.make_env()._scan(0, sell=None, buy=101.5), (2, 1))
+        self.assertEqual(self.make_env()._scan(0, 3, sell=None, buy=101.5), (2, 1))
 
-    def test_no_crossing_times_out(self):
-        self.assertEqual(self.make_env()._scan(0, sell=200.0, buy=None), (3, 0))
+    def test_no_crossing_returns_the_interval_end(self):
+        self.assertEqual(self.make_env()._scan(0, 3, sell=200.0, buy=None), (3, 0))
 
 
 class CenterAndFlattenTest(unittest.TestCase):
-    """平仓按对手一档价全额成交；每笔成交重置中心，超时重置为当拍中间价。
+    """平仓按对手一档价全额成交；每笔成交重置中心，区间无成交则决策锚点处重置为当拍中间价。
 
     合成日盘口恒定：买一 9.99 / 卖一 10.01 / 中间价 10.00。
     """
@@ -72,12 +71,12 @@ class CenterAndFlattenTest(unittest.TestCase):
         self.assertAlmostEqual(env.fills[-1].price, 10.01)   # 买入按卖一价
 
         n_fills = len(env.fills)
-        self.assertEqual(env._flatten_to_base(env.t, "flatten"), 0.0)
+        env._flatten_to_base(env.t, "flatten")
         self.assertEqual(len(env.fills), n_fills)    # 净持仓为零：无操作
 
     def test_interval_without_fill_recenters_to_the_current_mid(self):
         env = self.make_env()
-        env.center = 9.5   # 人为偏移中心，验证超时不沿用原中心
+        env.center = 9.5   # 人为偏移中心，验证无成交区间不沿用原中心
 
         res = env.step(GridParams(width=100.0, size=1))   # 关闭档：区间必然无成交
 

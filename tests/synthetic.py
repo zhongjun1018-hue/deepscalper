@@ -6,11 +6,12 @@ import pandas as pd
 from data_provider.ticks import DayData
 
 
-def synthetic_day(date: str = "20260102", n: int = 650) -> DayData:
-    """合成连续竞价日：09:30 起每 300ms 一条快照，盘口、累计量与日内状态字段齐备。"""
+def synthetic_day(date: str = "20260102", n: int = 820) -> DayData:
+    """合成连续竞价日：09:30 起每 3 秒一条快照（默认约 41 分钟，覆盖 30 分钟回看窗
+    与至少一个决策区间），盘口、累计量与日内状态字段齐备。"""
     frame = pd.DataFrame({
         "MDTime": pd.date_range("2026-01-02 09:30:00", periods=n,
-                                freq="300ms").strftime("%H%M%S%f").str[:-3],
+                                freq="3s").strftime("%H%M%S%f").str[:-3],
         "LastPx": 10.0, "OpenPx": 10.0, "HighPx": 10.2, "LowPx": 9.8,
         "MaxPx": 11.0, "MinPx": 9.0,
         "TotalVolumeTrade": np.arange(n, dtype=np.float64) * 100.0,

@@ -43,12 +43,15 @@ class MicroMatrixTest(unittest.TestCase):
 
 class MacroFeatureTest(unittest.TestCase):
     def test_bar_block_width(self):
-        mid = np.linspace(10.0, 10.5, 600)
-        volume = np.ones(600)
-        bars = build_macro_features(mid, volume, n_bars=30)
+        closes = np.linspace(10.0, 10.5, 30)
+        bars = np.column_stack([closes - 0.01, closes + 0.02, closes - 0.02,
+                                closes, np.ones(30)])
+        feats = build_macro_features(bars)
 
-        self.assertEqual(bars.shape, (BAR_DIM,))
-        self.assertTrue(np.isfinite(bars).all())
+        self.assertEqual(feats.shape, (BAR_DIM,))
+        self.assertTrue(np.isfinite(feats).all())
+        self.assertAlmostEqual(feats[1], 0.02 / closes[-1], places=6)   # z_high
+        self.assertAlmostEqual(feats[-1], 0.0)                          # z_volume
 
 
 if __name__ == "__main__":

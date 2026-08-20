@@ -8,14 +8,15 @@ from forecast.model import DEFAULT_MODEL_KWARGS
 
 @dataclass(frozen=True)
 class PipelineConfig:
-    """回归与模式识别产线共享的数据 / 采样口径：单一定义，避免两条产线漂移。"""
+    """回归与模式识别产线共享的数据 / 采样口径：单一定义，避免两条产线漂移。
+
+    训练与推理行即统一缓存的分钟锚点行（data_provider/windows.py），节奏由分钟
+    网格给出，无独立采样参数。
+    """
     data_dir: str = "data"
     cache_dir: str = "cache"
     symbols: tuple = ()
     window: WindowSpec = field(default_factory=WindowSpec)
-    # 决策间隔：门控每 stride_ticks 个 tick 重判一次，训练行也按此抽样
-    # （相邻 tick 的回看窗口重叠 599/600，全量入模只是重复样本）
-    stride_ticks: int = 20
     seed: int = 2021
 
 

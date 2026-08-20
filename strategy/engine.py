@@ -5,16 +5,25 @@ import numpy as np
 from strategy.grid import buy_crossed, sell_crossed
 
 
-def run_day(bid1, ask1, mid, hard_exclude, width, *, decide_interval=1, trace=False):
+def run_day(bid1, ask1, mid, hard_exclude, width, *, anchors=None, confirm_n=2,
+            trace=False):
     """在连续竞价快照序列上回放一张固定半宽网格。
 
     空仓且门控允许时在首个有效 mid 上以 mid 为中心开网；成交判定为对手方一档
     严格穿越边界（买一上穿上边界则卖出、卖一下穿下边界则买入，见 strategy/grid.py），
     成交价为边界价，成交后中心重置到成交价。日终不强制平仓。
 
-    hard_exclude 与报价序列逐 tick 对齐（None 表示常开），只在净持仓为 0 时读取当拍
-    信号：空仓期间每 decide_interval 个 tick 判一次；一旦成交，持仓途中的信号变化都不
-    生效，直到敞口归零才立即重判，并从该 tick 重新计时。
+    anchors 为分钟锚点的 tick 索引数组（与报价序列同一索引系，data_provider/ticks.py
+    的分钟网格），给出决策节奏与中心重建节奏：
+
+    - 门控（hard_exclude 与报价序列逐 tick 对齐，None 表示常开）只在净持仓为 0 时
+      读取：空仓期间在锚点 tick 复判；状态切换（开↔关）要求连续 confirm_n 个判定
+      一致才生效（去抖），单拍判定只更新计数器；敞口归零即刻重判并重置确认计数；
+    - 网格开启期间在每个锚点检查：自上一锚点以来无成交则中心重建为当拍中间价
+      （有成交则中心已在成交价，两锚点之间中心不动）。
+
+    anchors=None 为无锚点形态（窗口网格特征的反事实回放用）：门控空仓时逐 tick
+    复判、中心只随成交移动。
 
     返回 buys / sells 与无量纲、不含费用的 grid_profit
     （特征标签与形态评分的定义口径；成本由 strategy/costs.py 叠加）。
@@ -27,22 +36,39 @@ def run_day(bid1, ask1, mid, hard_exclude, width, *, decide_interval=1, trace=Fa
     if hard_exclude is not None and len(hard_exclude) != len(mid):
         raise ValueError("hard_exclude must be None or aligned with the quote series")
 
+    is_anchor = np.zeros(len(mid), dtype=bool)
+    if anchors is not None:
+        is_anchor[np.asarray(anchors, dtype=np.int64)] = True
+
     gated = hard_exclude is not None
     active = False
-    enabled = not gated          # 无门控时恒放行，无需逐 tick 查询
-    next_decision = 0
+    enabled = None if gated else True   # 无门控时恒放行；门控下首个判定直接定初态
+    streak = 0                   # 与当前状态相反的连续判定数（连续确认去抖）
+    filled_since_anchor = False
     center = upper = lower = entry_center = 0.0
     close_mid = float("nan")
     exposure = buys = sells = 0
     events = [] if trace else None
 
-    def decide(i):
-        # 两个调用点（空仓复判、成交归零）均已保证 exposure == 0
-        nonlocal active, enabled, next_decision
-        enabled = not bool(hard_exclude[i])
-        if not enabled:
-            active = False
-        next_decision = i + decide_interval
+    def judge(i):
+        # 两个调用点（空仓锚点复判、成交归零）均已保证 exposure == 0
+        nonlocal active, enabled, streak
+        wanted = not bool(hard_exclude[i])
+        if enabled is None:      # 日初自举不是状态切换，不经连续确认
+            enabled = wanted
+            return
+        if wanted == enabled:
+            streak = 0
+            return
+        streak += 1
+        if streak >= confirm_n:
+            enabled, streak = wanted, 0
+            if not enabled:
+                active = False
+
+    def record(i, kind, **extra):
+        events.append({"index": int(i), "kind": kind, "center": center,
+                       "upper": upper, "lower": lower, "exposure": exposure, **extra})
 
     for i in range(len(mid)):
         bid = bid1[i]
@@ -52,23 +78,26 @@ def run_day(bid1, ask1, mid, hard_exclude, width, *, decide_interval=1, trace=Fa
             close_mid = float(anchor)
         opened = False
 
-        if gated and exposure == 0 and i >= next_decision:
-            decide(i)
+        if gated and exposure == 0 and (is_anchor[i] or anchors is None):
+            judge(i)
 
         if exposure == 0 and enabled and not active and np.isfinite(anchor):
             center, active = float(anchor), True
             entry_center = center
             upper, lower = center + width, center - width
             opened = True
+            filled_since_anchor = False
             if trace:
-                events.append({
-                    "index": int(i),
-                    "kind": "open",
-                    "center": center,
-                    "upper": upper,
-                    "lower": lower,
-                    "exposure": exposure,
-                })
+                record(i, "open")
+
+        if active and not opened and is_anchor[i]:
+            # 锚点中心重建：上一锚点以来无成交则以当拍中间价重建网
+            if not filled_since_anchor and np.isfinite(anchor):
+                center = float(anchor)
+                upper, lower = center + width, center - width
+                if trace:
+                    record(i, "recenter")
+            filled_since_anchor = False
 
         if active and not opened:
             kind = fill = None
@@ -81,18 +110,12 @@ def run_day(bid1, ask1, mid, hard_exclude, width, *, decide_interval=1, trace=Fa
 
             if kind is not None:
                 upper, lower = center + width, center - width
+                filled_since_anchor = True
                 if trace:
-                    events.append({
-                        "index": int(i),
-                        "kind": kind,
-                        "fill": float(fill),
-                        "center": float(center),
-                        "upper": float(upper),
-                        "lower": float(lower),
-                        "exposure": exposure,
-                    })
+                    record(i, kind, fill=float(fill))
                 if gated and exposure == 0:
-                    decide(i)
+                    streak = 0   # 敞口归零：重置确认计数并即刻重判
+                    judge(i)
 
     trades = buys + sells
     grid_profit = 0.5 * (trades + exposure ** 2)

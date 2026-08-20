@@ -84,6 +84,25 @@ def minute_index(mdtime: pd.Series) -> np.ndarray:
     return np.where((afternoon >= MORNING_MINUTES) & (afternoon < MINUTES_PER_DAY), afternoon, idx)
 
 
+def minute_anchors(frame: pd.DataFrame) -> np.ndarray:
+    """单日快照帧 → 每个压缩分钟末快照的 tick 索引 (MINUTES_PER_DAY,)，无快照的分钟记 -1。
+
+    分钟网格（决策 / 特征 / 门控节奏）的唯一定义：缓存构建、engine 锚点门控与
+    RL 决策网格三处共用，避免各自实现产生漂移。
+    """
+    minute = minute_index(frame["MDTime"])
+    anchors = np.full(MINUTES_PER_DAY, -1, dtype=np.int64)
+    valid = minute >= 0
+    anchors[minute[valid]] = np.flatnonzero(valid)   # 升序赋值，同分钟末快照胜出
+    return anchors
+
+
+def anchor_ffill(anchors: np.ndarray) -> np.ndarray:
+    """锚点数组的前向填充：分钟 m 处为最近一个 ≤ m 且有快照的分钟的锚点 tick，无则 -1。"""
+    latest = np.maximum.accumulate(np.where(anchors >= 0, np.arange(len(anchors)), -1))
+    return np.where(latest >= 0, anchors[np.maximum(latest, 0)], -1)
+
+
 def _top_share(detail: pd.Series, total_quantity: np.ndarray) -> np.ndarray:
     """一侧一档订单明细中最大单笔委托占一档总量的比例。"""
     parts = pd.to_numeric(detail.str[1:-1].str.split("|").explode(), errors="coerce")

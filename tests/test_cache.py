@@ -10,7 +10,7 @@ from data_provider.windows import (CACHE_ARRAYS, CACHE_SCHEMA, FEATURE_NAMES,
                                    TARGET_NAMES, WindowSpec, cache_path, load_cache,
                                    predictions_current, write_predictions)
 
-DAYS, ROWS = 2, 11
+DAYS, ROWS = 2, 11   # ROWS 为合成的分钟行数（真实缓存为 MINUTES_PER_DAY）
 
 
 def make_cache(cache_dir, data_dir, symbol="TEST", schema=CACHE_SCHEMA):
@@ -27,7 +27,8 @@ def make_cache(cache_dir, data_dir, symbol="TEST", schema=CACHE_SCHEMA):
              dates=np.array(["20260101", "20260102"]),
              features=np.full((DAYS, ROWS, len(FEATURE_NAMES)), 1.0, dtype=np.float32),
              targets=targets, preds=np.full_like(targets, np.nan),
-             width=np.full(DAYS, 0.01, dtype=np.float32))
+             width=np.full(DAYS, 0.01, dtype=np.float32),
+             anchor_ticks=np.tile(np.arange(ROWS, dtype=np.int64), (DAYS, 1)))
     os.makedirs(data_dir, exist_ok=True)
 
 
@@ -44,6 +45,7 @@ class UnifiedCacheTest(unittest.TestCase):
             self.assertTrue(np.isnan(entry["preds"]).all())   # 尚未训练
             np.testing.assert_array_equal(entry["features"], 1.0)
             np.testing.assert_array_equal(entry["targets"], 2.0)
+            np.testing.assert_array_equal(entry["anchor_ticks"][0], np.arange(ROWS))
 
     def test_write_predictions_roundtrip(self):
         with tempfile.TemporaryDirectory() as cache_dir, \

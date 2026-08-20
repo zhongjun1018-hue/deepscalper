@@ -2,6 +2,7 @@ import unittest
 
 import numpy as np
 
+from data_provider.ticks import MINUTES_PER_DAY
 from data_provider.windows import FEATURE_NAMES
 
 from control.config import Config
@@ -9,7 +10,7 @@ from control.features import MACRO_FEATURE_COLUMNS, PRED_DIM, WINDOW_DIM
 from control.train import build_markets, eval_days
 from synthetic import synthetic_day
 
-ROWS = 7   # 合成缓存的样本行数
+ROWS = MINUTES_PER_DAY   # 缓存行数即压缩分钟数
 
 
 class EvalDaysTest(unittest.TestCase):
@@ -20,7 +21,7 @@ class EvalDaysTest(unittest.TestCase):
 
 
 class BuildMarketsTest(unittest.TestCase):
-    """build_markets：统一缓存的当日行块按宏观列选取后拼为 R×(24+5)，缺当日行时补零块。"""
+    """build_markets：统一缓存的当日行块按宏观列选取后拼为 M×(24+5)，缺当日行时补零块。"""
 
     def make_cache(self, date):
         # 第 j 列填 j，使「是否只取了宏观列」可直接比对

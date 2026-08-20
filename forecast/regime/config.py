@@ -17,9 +17,13 @@ class RegimeConfig(PipelineConfig):
     slope_ratio_threshold: float = 0.9
     # 规则命中视作潜在二元模式的带噪观测：粘性前向-后向平滑成事后标签。
     # 0.99/0.3 相比 0.95/0.2：经济区分度不变、test AUC 0.652→0.695、
-    # oracle/prediction 门控倒挂消除（22 标的全流水线对比选定）
+    # oracle/prediction 门控倒挂消除（22 标的全流水线对比选定）。
+    # 平滑拍即分钟锚点：对角 0.99/拍的隐含状态期望持续时长约 100 分钟
     sticky_stay: float = 0.99
     emission_noise: float = 0.3
+
+    # 门控执行的连续确认去抖：状态切换（开↔关）需连续 confirm_n 个锚点判定一致
+    confirm_n: int = 2
 
     # 识别器 LightGBM 二分类超参（早停轮数含在内）
     model_kwargs: dict = field(default_factory=lambda: {

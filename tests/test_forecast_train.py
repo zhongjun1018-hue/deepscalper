@@ -26,7 +26,7 @@ class SymbolRowsTest(unittest.TestCase):
         bank["targets"][0, 0, 0] = np.nan     # 目标缺失的行剔除
         bank["features"][0, 1] = np.nan       # 特征全缺失的行剔除
 
-        feats, targs = symbol_rows(bank, {"20260102"}, stride=1)
+        feats, targs = symbol_rows(bank, {"20260102"})
 
         self.assertEqual((len(feats), len(targs)), (ROWS - 2, ROWS - 2))
         np.testing.assert_array_equal(targs, 1.0)
@@ -39,7 +39,7 @@ class TrainingRowsTest(unittest.TestCase):
         banks = {"B": make_bank(["20260102"], 2.0), "A": make_bank(["20260102"], 1.0)}
         date_set = {"A": {"20260102"}, "B": {"20260102"}}
 
-        x, y = training_rows(banks, date_set, stride=1)
+        x, y = training_rows(banks, date_set)
 
         self.assertEqual(x.shape, (2 * ROWS, len(FEATURE_NAMES) + 1))
         np.testing.assert_array_equal(x[:ROWS, -1], 0.0)   # A 排序在前
