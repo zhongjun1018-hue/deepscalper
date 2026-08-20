@@ -88,7 +88,13 @@ class FeatureStats:
 
     @classmethod
     def from_state_dict(cls, state: dict) -> "FeatureStats":
-        return cls(*(np.asarray(state[name]) for name in
+        """torch.load(map_location=cuda) 会把张量放到显存，先搬回 CPU 再转 numpy。"""
+        import torch
+
+        def to_np(v):
+            return v.detach().cpu().numpy() if isinstance(v, torch.Tensor) else np.asarray(v)
+
+        return cls(*(to_np(state[name]) for name in
                      ("micro_mean", "micro_std", "macro_mean", "macro_std")),
                    clip=state["clip"])
 
@@ -122,7 +128,8 @@ def fit_feature_stats(markets, cfg) -> FeatureStats:
     macro = [_Moments() for _ in range(cfg.n_symbols)]
     for m in markets:
         micro[m.symbol_id].add(m.micro[::4])
-        macro[m.symbol_id].add([m.macro_at(t, normalized=False) for t in m.sample_points])
+        macro[m.symbol_id].add([m.macro_at(minute, normalized=False)
+                                for minute in m.sample_points])
     micro_stats = [moments.stats() for moments in micro]
     macro_stats = [moments.stats() for moments in macro]
     return FeatureStats(np.stack([mean for mean, _ in micro_stats]),

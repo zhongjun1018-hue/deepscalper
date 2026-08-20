@@ -109,8 +109,8 @@ class DayMarket:
             & (num_trades[1:] > np.fmax.accumulate(num_trades)[:-1])
         )
         # 拟合标准化统计量所用的固定分钟锚点采样（与决策相位无关）
-        self.sample_points = [int(a) for a in self.anchors[cfg.lookback_min - 1:]
-                              if a >= 0]
+        self.sample_points = [m for m in range(cfg.lookback_min - 1, MINUTES_PER_DAY)
+                              if self.anchors[m] >= 0]
         self.stats: FeatureStats | None = None
         self.symbol_id = symbol_id
         self.window = window if window is not None else np.zeros(
@@ -154,10 +154,10 @@ class DayMarket:
 
     @property
     def tradable(self) -> bool:
-        """需有有效 ATR（前 A 日完整）与至少一个可推进的决策区间。"""
+        """需有有效 ATR（前 A 日完整）、有定义的起点锚点与至少一个可推进的决策区间。"""
         if not np.isfinite(self.atr) or self.atr <= 0.0:
             return False
-        return (self.anchors[self.cfg.lookback_min - 1:] >= 0).any() and self.start < self.n - 1
+        return 0 <= self.start < self.n - 1
 
     @property
     def p0(self) -> float:
@@ -185,44 +185,43 @@ class DayMarket:
             self.micro = stats.micro(self.micro, self.symbol_id)
         self.stats = stats
 
-    def sample_times(self, t: int) -> np.ndarray:
-        """决策点 t 的回看抽样时刻：末 micro_steps 个分钟的锚点，末项恰为 t。
+    def sample_times(self, minute: int) -> np.ndarray:
+        """决策分钟 minute 的回看抽样时刻：末 micro_steps 个分钟的锚点，末项为决策 tick。
 
-        无快照的分钟前向填充到最近锚点（重复前帧），早于当日首个锚点的分钟取
-        首个锚点，与微观、私有序列逐行对应。
+        决策分钟无快照时前向填充到最近锚点，故一律按分钟而非决策 tick 所在分钟取窗：
+        窗口始终覆盖 [minute−micro_steps+1, minute]，无快照的分钟重复前帧，早于当日
+        首个锚点的分钟取首个锚点，与微观、私有序列逐行对应。
         """
-        m = self.minute[t]
-        times = self.anchor_fill[m - self.cfg.micro_steps + 1: m + 1]
+        times = self.anchor_fill[minute - self.cfg.micro_steps + 1: minute + 1]
         first = self.anchors[self.anchors >= 0][0]
         return np.where(times >= 0, times, first)
 
-    def micro_window(self, t: int) -> np.ndarray:
+    def micro_window(self, minute: int) -> np.ndarray:
         """回看窗口内按分钟锚点抽样的微观序列 (micro_steps, MICRO_DIM)。
 
-        取每分钟的末快照，故序列末帧恰为决策点 t 的快照，与宏观 bar 的收盘价
+        取每分钟的末快照，故序列末帧恰为决策 tick 的快照，与宏观 bar 的收盘价
         对齐——决策所依据的最新盘口与撮合所用的盘口为同一快照。
         """
-        return self.micro[self.sample_times(t)]
+        return self.micro[self.sample_times(minute)]
 
-    def macro_at(self, t: int, normalized: bool = True) -> np.ndarray:
+    def macro_at(self, minute: int, normalized: bool = True) -> np.ndarray:
         cfg = self.cfg
-        m = self.minute[t]
-        macro = build_macro_features(self.bars[m - cfg.n_bars + 1: m + 1])
-        # 行索引即分钟索引：第 m 行的窗口恰好收于分钟 m 的锚点，不含未完结数据
-        macro = np.concatenate([macro, self.window[m]])
+        macro = build_macro_features(self.bars[minute - cfg.n_bars + 1: minute + 1])
+        # 行索引即分钟索引：第 minute 行的窗口恰好收于该分钟的锚点，不含未完结数据
+        macro = np.concatenate([macro, self.window[minute]])
         if normalized and self.stats is not None:
             macro = self.stats.macro(macro, self.symbol_id)
         return macro
 
-    def observe(self, t: int, priv_hist: np.ndarray) -> Observation:
-        """构建决策点 t 的观测。
+    def observe(self, minute: int, priv_hist: np.ndarray) -> Observation:
+        """构建决策分钟 minute 的观测。
 
         priv_hist 为 (micro_steps+1, PRIV_RAW_DIM) 的私有状态原始记录：末 micro_steps
-        行与 sample_times(t) 一一对应（末行即 t 的当期状态），首行为窗口前一分钟的
-        锚点状态，供累计成交笔数差分出首步的步内笔数。
+        行与 sample_times(minute) 一一对应（末行即决策 tick 的当期状态），首行为窗口
+        前一分钟的锚点状态，供累计成交笔数差分出首步的步内笔数。
         """
         cfg = self.cfg
-        times = self.sample_times(t)
+        times = self.sample_times(minute)
         rows = priv_hist[1:]
         private = np.empty((cfg.micro_steps, PRIVATE_DIM), dtype=np.float32)
         private[:, 0] = rows[:, PRIV_POS] / cfg.max_position
@@ -243,9 +242,9 @@ class DayMarket:
             rows[:, PRIV_INT_NOTIONAL] / np.where(lots > 0.0, lots, 1.0) / self.atr,
             0.0)
         return Observation(
-            micro_lob=self.micro_window(t),
+            micro_lob=self.micro_window(minute),
             private=private,
-            macro=self.macro_at(t),
+            macro=self.macro_at(minute),
             symbol_id=self.symbol_id,
             flatten_allowed=bool(rows[-1, PRIV_POS] != cfg.base_position),
         )
@@ -261,10 +260,10 @@ class DayMarket:
         fee_cost = fee(side, notional)
         return -side * notional - fee_cost, fee_cost, side * (notional - abs(qty) * self.mid[t])
 
-    def hindsight_price(self, t: int) -> float:
-        """hindsight 标签的未来价：pred_min 分钟后的锚点中间价（不跨日，尾部截断）。"""
-        horizon = min(self.minute[t] + self.cfg.window.pred_min, MINUTES_PER_DAY - 1)
-        return float(self.mid[max(self.anchor_fill[horizon], t)])
+    def hindsight_price(self, minute: int) -> float:
+        """hindsight 标签的未来价：决策分钟 pred_min 分钟后的锚点中间价（不跨日，尾部截断）。"""
+        horizon = min(minute + self.cfg.window.pred_min, MINUTES_PER_DAY - 1)
+        return float(self.mid[max(self.anchor_fill[horizon], self.decision_tick(minute))])
 
 
 @dataclass(frozen=True)
@@ -309,6 +308,7 @@ class StepResult:
     reward: float            # 超额 P&L 奖励（评估口径）
     train_reward: float      # 按 σ_d 归一、含 hindsight bonus 与存货惩罚的训练奖励
     done: bool
+    minute: int              # 下一决策分钟
     t: int                   # 下一决策点的 tick 索引
     priv_hist: np.ndarray    # 下一决策点的私有状态历史
 
@@ -366,21 +366,20 @@ class TradingEnv:
         rows[:, PRIV_INT_NOTIONAL] = self.int_notional
         rows[:, PRIV_INT_LOTS] = self.int_lots
 
-    def priv_window(self, t: int) -> np.ndarray:
-        """决策点 t 的私有状态历史 (micro_steps+1, PRIV_RAW_DIM)。
+    def priv_window(self, minute: int) -> np.ndarray:
+        """决策分钟 minute 的私有状态历史 (micro_steps+1, PRIV_RAW_DIM)。
 
         首行为窗口前一分钟的锚点（日初缺失取 tick 0，累计量为 0），
         供 observe 差分出首步的步内成交笔数。
         """
         m = self.market
-        minute = m.minute[t]
         lead_minute = minute - self.cfg.micro_steps
         lead = m.anchor_fill[lead_minute] if lead_minute >= 0 else -1
-        times = np.concatenate([[max(int(lead), 0)], m.sample_times(t)])
+        times = np.concatenate([[max(int(lead), 0)], m.sample_times(minute)])
         return self.priv_raw[times].copy()
 
     def observation(self) -> Observation:
-        return self.market.observe(self.t, self.priv_window(self.t))
+        return self.market.observe(self.minute, self.priv_window(self.minute))
 
     # ---- 撮合 ----
     def _lines(self, width: float) -> tuple[float, float]:
@@ -558,7 +557,7 @@ class TradingEnv:
         train_reward = reward
         if self.hindsight:
             train_reward += (cfg.hindsight_weight
-                             * (m.hindsight_price(t) - p_open) * mean_excess / b)
+                             * (m.hindsight_price(self.minute) - p_open) * mean_excess / b)
         load = mean_excess * p_open / b
         train_reward = train_reward / m.sigma_d - cfg.inventory_lambda * load * load * tau / m.n
 
@@ -571,12 +570,13 @@ class TradingEnv:
         self.t = t_next
         self.minute = minute_next
         return StepResult(
-            obs=None if done else m.observe(t_next, self.priv_window(t_next)),
+            obs=None if done else m.observe(minute_next, self.priv_window(minute_next)),
             reward=float(reward),
             train_reward=float(train_reward),
             done=done,
+            minute=minute_next,
             t=t_next,
-            priv_hist=self.priv_window(t_next),
+            priv_hist=self.priv_window(minute_next),
         )
 
     def net_value(self) -> float:

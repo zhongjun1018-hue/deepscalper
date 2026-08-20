@@ -119,7 +119,7 @@ def replay_grid_day(bank: SymbolBank, day_index: int, mask_full, cfg: RegimeConf
     """单日 engine 回放（mask_full=None 为常开），返回 metrics.summarize 的日记录。
 
     口径同统一回测：自可预测起点（缺省分钟 lookback_min−1，回看窗满的首个锚点）起、
-    固定半宽 W_d、锚点门控节奏加连续确认（confirm_n），锚点中心重建同 engine 规则；
+    固定半宽 W_d、逐 tick 撮合、锚点门控节奏加连续确认（confirm_n）；
     g = 费用后净利润 / W_d。回放区间为空时返回 {}。
     """
     bid1, ask1, mid = bank.quotes[day_index]

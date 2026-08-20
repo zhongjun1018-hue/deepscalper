@@ -113,7 +113,7 @@ uv sync                # torch(CUDA 12.8) / numpy / pandas / lightgbm / scikit-l
 - `forecast/runs/`：前瞻回归模型（`model/`）与预测评估（`metrics.json`、可选 `figures/`）。
 - `forecast/regime/runs/`：识别器（`model/`）、`meta.json`（含门控阈值 τ）、识别评估 `metrics.json` 与经济验证 `economics.json`。
 - `strategy/runs/`：统一回测（`summary.json` 与各指标热力图 SVG：费用后网格收益 $g$、日均闭环率与成交次数（各含等权与按成交笔数加权两个口径）、网格宽幅与门控占比）。
-- `control/runs/`：`<method>[_w<权重>][_lam<λ>][_seed<k>].json` 统一训练结果（测试指标逐标的报告 + 全体等权行）与同名 `.pt` 检查点（选模后的最佳权重、消融的固定档位与逐标的标准化统计量，供统一回测与 webviz 回放），`summary.csv` 汇总表；`sweep/` 为超参探索的逐作业结果与 `sweep/summary.csv` 梯子对比表。
+- `control/runs/`：`<method>[_w<权重>][_lam<λ>][_seed<k>].json` 统一训练结果（测试指标逐标的报告 + 全体等权行）与同名 `.pt` 检查点（选模后的最佳权重与逐标的标准化统计量，供统一回测与 webviz 回放），`summary.csv` 汇总表；`sweep/` 为超参探索的逐作业结果与 `sweep/summary.csv` 梯子对比表。
 - 每个 RL 作业同时建一个 wandb run（项目 `gridscalper`）：逐验证点记录训练奖励、Q 损失与验证 TR、SR 及选模判据曲线；训练结束记录测试集指标与逐日表（design 7.5）。
 
 ## 关键参数

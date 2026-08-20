@@ -13,9 +13,8 @@
 strategy.engine.run_day(trace=True)（锚点门控 + 连续确认，只在净持仓为 0 时生效）。
 网格回放只覆盖测试段（样本外），其余日期仅导出价格与窗口。
 
-control 数据源：control.trace.load_checkpoint 重建统一训练的网络、Config、消融的
-固定档位与逐标的标准化统计量，greedy_policy 构建贪心策略，prepare_test_markets 构建
-测试段市场；逐测试日 control.trace.trace_day 贪心回放（定长决策），单日摘要与门控
+control 数据源：control.trace.load_checkpoint 重建统一训练的网络、Config 与逐标的
+标准化统计量，greedy_policy 构建贪心策略，prepare_test_markets 构建测试段市场；逐测试日 control.trace.trace_day 贪心回放（定长决策），单日摘要与门控
 卡片同指标口径（g = 超额收益 × B / W_d，与 strategy.backtest 的 agent 模式一致）。
 """
 
@@ -287,12 +286,12 @@ def export_control_symbol(symbol: str, checkpoint: tuple, args) -> dict:
     from data_provider.ticks import load_days as load_symbol_days
     from control.trace import greedy_policy, prepare_test_markets, trace_day
 
-    net, cfg, fixed_gears, stats, device, path = checkpoint
+    net, cfg, stats, device, path = checkpoint
     test_m = prepare_test_markets(symbol, cfg, stats, args.data_dir, args.cache_dir)
     day_lookup = {d.date: d for d in load_symbol_days(symbol, data_dir=args.data_dir)}
     tables = {m.date: day_table(day_lookup[m.date]) for m in test_m}
     del day_lookup
-    policy = greedy_policy(net, device, fixed_gears)
+    policy = greedy_policy(net, device)
 
     out_dir = os.path.join(args.out_dir, "control", symbol)
     os.makedirs(out_dir, exist_ok=True)
@@ -335,7 +334,7 @@ def export_control_symbol(symbol: str, checkpoint: tuple, args) -> dict:
 
 
 def load_control_checkpoint(args, parser) -> tuple:
-    """加载统一训练检查点，返回 (net, cfg, fixed_gears, stats, device, path)。"""
+    """加载统一训练检查点，返回 (net, cfg, stats, device, path)。"""
     from control.config import Config as ControlConfig
     from control.model import resolve_device
     from control.trace import load_checkpoint, resolve_checkpoint
@@ -346,8 +345,8 @@ def load_control_checkpoint(args, parser) -> tuple:
     except (FileNotFoundError, ValueError) as exc:
         parser.error(str(exc))
     device = resolve_device(ControlConfig())
-    net, cfg, fixed_gears, stats = load_checkpoint(path, device)
-    return net, cfg, fixed_gears, stats, device, path
+    net, cfg, stats = load_checkpoint(path, device)
+    return net, cfg, stats, device, path
 
 
 def forecast_params(cfg: RegimeConfig, threshold: float) -> dict:

@@ -18,7 +18,6 @@ from .model import BranchQNetwork, resolve_device, to_batch
 def _branching_next_value(
     online_q: list[torch.Tensor],
     target_q: list[torch.Tensor],
-    fixed_gears: tuple[int | None, ...],
     inactive_gears: tuple[int, ...],
     flatten_allowed: torch.Tensor,
 ) -> torch.Tensor:
@@ -32,13 +31,8 @@ def _branching_next_value(
     q0[~flatten_allowed, 0] = -torch.inf
     online_q = [q0, *online_q[1:]]
     actions, values = [], []
-    for fixed, oq, tq in zip(fixed_gears, online_q, target_q):
-        if fixed is None:
-            action = oq.argmax(-1, keepdim=True)
-        else:
-            action = torch.full(
-                (oq.shape[0], 1), fixed, dtype=torch.long, device=oq.device
-            )
+    for oq, tq in zip(online_q, target_q):
+        action = oq.argmax(-1, keepdim=True)
         actions.append(action.squeeze(1))
         values.append(tq.gather(1, action).squeeze(1))
     if len(values) == 1:
@@ -52,16 +46,8 @@ def _branching_next_value(
 
 
 class BranchQAgent:
-    """fixed_gears 给定某分支的档位索引时该分支不再探索（消融用），其余分支照常学习。"""
-
-    def __init__(
-        self,
-        cfg: Config,
-        seed: int,
-        fixed_gears: tuple[int | None, int | None] = (None, None),
-    ):
+    def __init__(self, cfg: Config, seed: int):
         self.cfg = cfg
-        self.fixed_gears = fixed_gears
         self.inactive_gears = cfg.inactive_gears
         self.device = resolve_device(cfg)
         torch.manual_seed(seed)
@@ -76,10 +62,8 @@ class BranchQAgent:
         self.updates = 0
 
     # ---- 决策 ----
-    def _apply_fixed(self, gears: list[int]) -> tuple[int, int]:
-        for i, fixed in enumerate(self.fixed_gears[: len(gears)]):
-            if fixed is not None:
-                gears[i] = fixed
+    @staticmethod
+    def _as_action(gears: list[int]) -> tuple[int, int]:
         return gears[0], gears[1] if len(gears) > 1 else 0
 
     def act(self, obs: Observation, epsilon: float) -> tuple[int, int]:
@@ -89,7 +73,7 @@ class BranchQAgent:
             gears = [int(self.rng.integers(lo, self.cfg.n_width))]
             if self.cfg.n_size > 1:
                 gears.append(int(self.rng.integers(self.cfg.n_size)))
-            return self._apply_fixed(gears)
+            return self._as_action(gears)
         return self.greedy(obs)
 
     def greedy(self, obs: Observation) -> tuple[int, int]:
@@ -98,7 +82,7 @@ class BranchQAgent:
             q = self.online(*to_batch([obs], self.device))
         if not obs.flatten_allowed:
             q[0][:, 0] = -torch.inf
-        return self._apply_fixed([int(b.argmax(-1).item()) for b in q])
+        return self._as_action([int(b.argmax(-1).item()) for b in q])
 
     # ---- 学习 ----
     def push(self, tr: Transition) -> None:
@@ -111,9 +95,9 @@ class BranchQAgent:
             return None
         batch, idx, weights = self.buffer.sample(cfg.batch_size, beta, self.rng)
 
-        obs = [markets[tr.day_id].observe(tr.t, tr.priv_hist) for tr in batch]
+        obs = [markets[tr.day_id].observe(tr.minute, tr.priv_hist) for tr in batch]
         next_obs = [
-            None if tr.done else markets[tr.day_id].observe(tr.next_t, tr.next_priv_hist)
+            None if tr.done else markets[tr.day_id].observe(tr.next_minute, tr.next_priv_hist)
             for tr in batch
         ]
 
@@ -138,8 +122,7 @@ class BranchQAgent:
                     [o.flatten_allowed for o in kept_obs], device=self.device
                 )
                 next_value[index] = _branching_next_value(
-                    online_q, target_q, self.fixed_gears, self.inactive_gears,
-                    flatten_allowed
+                    online_q, target_q, self.inactive_gears, flatten_allowed
                 )
             # 定长区间：TD 折扣为常数 gamma^decision_interval_min（design 4.2）
             target = rewards + cfg.td_discount * next_value

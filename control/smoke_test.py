@@ -21,10 +21,10 @@ def interact(env: TradingEnv, cfg: Config, agent: BranchQAgent, day_id: int = 0)
     """交互一步并入队，返回环境结果。"""
     obs = env.observation()
     action = agent.act(obs, epsilon=1.0)
-    t, priv_hist = env.t, env.priv_window(env.t)
+    minute, priv_hist = env.minute, env.priv_window(env.minute)
     res = env.step(action_params(cfg, action))
-    agent.push(Transition(day_id, t, action, res.train_reward,
-                          res.t if not res.done else -1, res.done,
+    agent.push(Transition(day_id, minute, action, res.train_reward,
+                          res.minute if not res.done else -1, res.done,
                           priv_hist, res.priv_hist))
     return res
 

@@ -17,24 +17,21 @@ from control.train import save_checkpoint
 
 
 class CheckpointRoundTripTest(unittest.TestCase):
-    """save_checkpoint → load_checkpoint 往返：权重与固定档位一致，嵌套 WindowSpec 还原为 dataclass。"""
+    """save_checkpoint → load_checkpoint 往返：权重一致，嵌套 WindowSpec 还原为 dataclass。"""
 
-    def test_config_weights_gears_and_stats_survive_the_roundtrip(self):
+    def test_config_weights_and_stats_survive_the_roundtrip(self):
         cfg = Config(symbols=("301308",))
         net = BranchQNetwork(cfg)
         stats = FeatureStats(np.zeros((1, 66)), np.ones((1, 66)),
                              np.zeros((1, 40)), np.ones((1, 40)),
                              clip=cfg.norm_clip)
         with tempfile.TemporaryDirectory() as folder:
-            path = os.path.join(folder, "GRID-FW_w0.1_lam3_seed0.pt")
-            save_checkpoint(SimpleNamespace(online=net, fixed_gears=(2, None)), cfg,
-                            stats, path)
-            restored, loaded_cfg, fixed_gears, loaded_stats = load_checkpoint(
-                path, torch.device("cpu"))
+            path = os.path.join(folder, "GRID_w0.1_lam3_seed0.pt")
+            save_checkpoint(SimpleNamespace(online=net), cfg, stats, path)
+            restored, loaded_cfg, loaded_stats = load_checkpoint(path, torch.device("cpu"))
 
         self.assertIsInstance(loaded_cfg.window, WindowSpec)
         self.assertEqual(loaded_cfg, cfg)
-        self.assertEqual(fixed_gears, (2, None))   # 消融的固定档位随检查点往返
         np.testing.assert_array_equal(loaded_stats.macro_std, stats.macro_std)
         self.assertEqual(loaded_stats.clip, cfg.norm_clip)
         for name, weight in net.state_dict().items():
@@ -42,7 +39,7 @@ class CheckpointRoundTripTest(unittest.TestCase):
 
 
 class GreedyPolicyTest(unittest.TestCase):
-    """greedy_policy：网络前向取各分支 argmax 档位，固定分支恒用指定档（消融口径）。"""
+    """greedy_policy：网络前向取各分支 argmax 档位。"""
 
     def make_obs(self, cfg: Config) -> Observation:
         return Observation(
@@ -50,19 +47,15 @@ class GreedyPolicyTest(unittest.TestCase):
             private=np.zeros((cfg.micro_steps, PRIVATE_DIM), dtype=np.float32),
             macro=np.zeros(MACRO_DIM, dtype=np.float32))
 
-    def test_gears_are_valid_and_fixed_branch_is_respected(self):
+    def test_gears_are_valid(self):
         cfg = Config(symbols=("301308",))
         net = BranchQNetwork(cfg).eval()
         obs = self.make_obs(cfg)
         device = torch.device("cpu")
 
-        width_gear, size_gear = greedy_policy(net, device, (None, None))(obs)
+        width_gear, size_gear = greedy_policy(net, device)(obs)
         self.assertIn(width_gear, range(cfg.n_width))
         self.assertIn(size_gear, range(cfg.n_size))
-
-        fixed_width = cfg.widths.index(0.1)
-        self.assertEqual(greedy_policy(net, device, (fixed_width, None))(obs)[0],
-                         fixed_width)
 
     def test_flatten_gear_is_masked_when_net_position_is_zero(self):
         cfg = Config(symbols=("301308",))
@@ -71,7 +64,7 @@ class GreedyPolicyTest(unittest.TestCase):
         obs.flatten_allowed = False
 
         # 平仓档（半宽档 0）在净持仓为零时不可选（与 BranchQAgent.greedy 同一掩码）
-        self.assertNotEqual(greedy_policy(net, torch.device("cpu"), (None, None))(obs)[0], 0)
+        self.assertNotEqual(greedy_policy(net, torch.device("cpu"))(obs)[0], 0)
 
 
 class TraceDayTest(unittest.TestCase):

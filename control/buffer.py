@@ -14,10 +14,10 @@ import numpy as np
 @dataclass
 class Transition:
     day_id: int
-    t: int                    # 决策点的 tick 索引
+    minute: int               # 决策分钟
     action: tuple[int, int]   # (半宽档, 数量档)
     reward: float             # 训练奖励（含塑形项）
-    next_t: int               # -1 表示终止
+    next_minute: int          # -1 表示终止
     done: bool
     priv_hist: np.ndarray     # 决策时（动作前）的私有状态历史
     next_priv_hist: np.ndarray

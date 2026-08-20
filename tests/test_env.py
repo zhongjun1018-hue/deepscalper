@@ -1,4 +1,5 @@
 import unittest
+from dataclasses import replace
 from types import SimpleNamespace
 
 import numpy as np
@@ -90,6 +91,28 @@ class CenterAndFlattenTest(unittest.TestCase):
         env.pos = 60.0
         env._write_priv(env.t, env.t, width=0.0, size=0)
         self.assertTrue(env.observation().flatten_allowed)
+
+
+class SparseMinuteTest(unittest.TestCase):
+    """决策分钟无快照时前向填充到更早分钟的 tick，观测窗口仍按决策分钟取满 micro_steps 行。"""
+
+    def test_replay_survives_a_gap_across_the_first_decision_minute(self):
+        day = synthetic_day()
+        minute = day.frame["MDTime"].str[:4].astype(int)
+        day = replace(day, frame=day.frame[(minute < 950) | (minute >= 1005)].reset_index(drop=True))
+        market = DayMarket(day, Config())
+        env = TradingEnv(market, hindsight=False)
+        self.assertLess(market.minute[env.t], env.minute)
+        obs = env.observation()
+        self.assertEqual(obs.private.shape[0], market.cfg.micro_steps)
+        while not env.step(GridParams(0.1, size=1)).done:
+            pass
+
+    def test_day_opening_after_the_first_decision_minute_is_not_tradable(self):
+        day = synthetic_day()
+        minute = day.frame["MDTime"].str[:4].astype(int)
+        day = replace(day, frame=day.frame[minute >= 1000].reset_index(drop=True))
+        self.assertFalse(DayMarket(day, Config()).tradable)
 
 
 class BoundaryRoundingTest(unittest.TestCase):

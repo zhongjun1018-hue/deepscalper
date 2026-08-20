@@ -46,7 +46,7 @@ class Config:
     window: WindowSpec = field(default_factory=WindowSpec)
 
     # ---- 状态特征 ----
-    use_predictions: bool = True    # 宏观向量是否含 LightGBM 前瞻预测（GRID-NA 消融置 False）
+    use_predictions: bool = True    # 宏观向量是否含 LightGBM 前瞻预测（GRID-NA / GRID-NHNA 消融置 False）
 
     # ---- 标的标识 ----
     symbols: tuple[str, ...] = ()   # 本次运行的标的集合，决定 symbol_id 与 embedding 规模

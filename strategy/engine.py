@@ -13,17 +13,12 @@ def run_day(bid1, ask1, mid, hard_exclude, width, *, anchors=None, confirm_n=2,
     严格穿越边界（买一上穿上边界则卖出、卖一下穿下边界则买入，见 strategy/grid.py），
     成交价为边界价，成交后中心重置到成交价。日终不强制平仓。
 
-    anchors 为分钟锚点的 tick 索引数组（与报价序列同一索引系，data_provider/ticks.py
-    的分钟网格），给出决策节奏与中心重建节奏：
-
-    - 门控（hard_exclude 与报价序列逐 tick 对齐，None 表示常开）只在净持仓为 0 时
-      读取：空仓期间在锚点 tick 复判；状态切换（开↔关）要求连续 confirm_n 个判定
-      一致才生效（去抖），单拍判定只更新计数器；敞口归零即刻重判并重置确认计数；
-    - 网格开启期间在每个锚点检查：自上一锚点以来无成交则中心重建为当拍中间价
-      （有成交则中心已在成交价，两锚点之间中心不动）。
-
-    anchors=None 为无锚点形态（窗口网格特征的反事实回放用）：门控空仓时逐 tick
-    复判、中心只随成交移动。
+    撮合逐 tick 进行，中心只随成交移动。anchors 为分钟锚点的 tick 索引数组（与报价
+    序列同一索引系，data_provider/ticks.py 的分钟网格），只给出门控的判定节奏：
+    门控（hard_exclude 与报价序列逐 tick 对齐，None 表示常开）只在净持仓为 0 时
+    读取，空仓期间在锚点 tick 复判；状态切换（开↔关）要求连续 confirm_n 个判定
+    一致才生效（去抖），单拍判定只更新计数器；敞口归零即刻重判并重置确认计数。
+    anchors=None 时门控空仓期间逐 tick 复判（窗口网格特征的反事实回放用）。
 
     返回 buys / sells 与无量纲、不含费用的 grid_profit
     （特征标签与形态评分的定义口径；成本由 strategy/costs.py 叠加）。
@@ -44,7 +39,6 @@ def run_day(bid1, ask1, mid, hard_exclude, width, *, anchors=None, confirm_n=2,
     active = False
     enabled = None if gated else True   # 无门控时恒放行；门控下首个判定直接定初态
     streak = 0                   # 与当前状态相反的连续判定数（连续确认去抖）
-    filled_since_anchor = False
     center = upper = lower = entry_center = 0.0
     close_mid = float("nan")
     exposure = buys = sells = 0
@@ -86,18 +80,8 @@ def run_day(bid1, ask1, mid, hard_exclude, width, *, anchors=None, confirm_n=2,
             entry_center = center
             upper, lower = center + width, center - width
             opened = True
-            filled_since_anchor = False
             if trace:
                 record(i, "open")
-
-        if active and not opened and is_anchor[i]:
-            # 锚点中心重建：上一锚点以来无成交则以当拍中间价重建网
-            if not filled_since_anchor and np.isfinite(anchor):
-                center = float(anchor)
-                upper, lower = center + width, center - width
-                if trace:
-                    record(i, "recenter")
-            filled_since_anchor = False
 
         if active and not opened:
             kind = fill = None
@@ -110,7 +94,6 @@ def run_day(bid1, ask1, mid, hard_exclude, width, *, anchors=None, confirm_n=2,
 
             if kind is not None:
                 upper, lower = center + width, center - width
-                filled_since_anchor = True
                 if trace:
                     record(i, kind, fill=float(fill))
                 if gated and exposure == 0:

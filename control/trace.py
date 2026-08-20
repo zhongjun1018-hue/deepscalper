@@ -56,14 +56,11 @@ def resolve_checkpoint(method: str = "GRID", seed: int = 0,
     return path
 
 
-def load_checkpoint(path: str, device) -> tuple[BranchQNetwork, Config,
-                                                tuple[int | None, int | None],
-                                                FeatureStats | None]:
+def load_checkpoint(path: str, device) -> tuple[BranchQNetwork, Config, FeatureStats | None]:
     """加载 control/train.py save_checkpoint 保存的检查点（eval 模式）。
 
-    返回（网络, 配置, 消融的固定档位, 逐标的标准化统计量）；固定档位经 greedy_policy
-    套用，回放才与训练评估（BranchQAgent.greedy）同一口径；统计量随检查点保存，
-    回放侧不重新拟合（prepare_test_markets）。
+    返回（网络, 配置, 逐标的标准化统计量）；统计量随检查点保存，回放侧不重新拟合
+    （prepare_test_markets）。
     """
     payload = torch.load(path, map_location=device)
     config = dict(payload["config"])
@@ -74,25 +71,21 @@ def load_checkpoint(path: str, device) -> tuple[BranchQNetwork, Config,
     net.load_state_dict(payload["state_dict"])
     stats = (FeatureStats.from_state_dict(payload["feature_stats"])
              if payload["feature_stats"] is not None else None)
-    return net, cfg, tuple(payload["fixed_gears"]), stats
+    return net, cfg, stats
 
 
-def greedy_policy(net: BranchQNetwork, device, fixed_gears: tuple[int | None, int | None]):
+def greedy_policy(net: BranchQNetwork, device):
     """由检查点网络构建贪心档位策略 policy(obs) → (半宽档, 数量档)。
 
-    固定分支不取 argmax 而恒用指定档：消融训练中该分支只在固定档上收到监督，
-    其余档位的 Q 值未经训练；平仓档只在净持仓非零时可选；数量单档时网络无数量
-    分支，数量档恒为 0（均与 BranchQAgent 同一口径）。
+    平仓档只在净持仓非零时可选；数量单档时网络无数量分支，数量档恒为 0
+    （均与 BranchQAgent.greedy 同一口径）。
     """
     def policy(obs) -> tuple[int, int]:
         with torch.no_grad():
             q = net(*to_batch([obs], device))
         if not obs.flatten_allowed:
             q[0][:, 0] = -torch.inf
-        gears = [
-            fixed if fixed is not None else int(branch.argmax(-1).item())
-            for fixed, branch in zip(fixed_gears, q)
-        ]
+        gears = [int(branch.argmax(-1).item()) for branch in q]
         return gears[0], gears[1] if len(gears) > 1 else 0
 
     return policy

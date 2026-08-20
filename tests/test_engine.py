@@ -138,25 +138,23 @@ class ConfirmTest(unittest.TestCase):
         self.assertEqual((result["buys"], result["sells"]), (0, 0))
 
 
-class RecenterTest(unittest.TestCase):
-    """锚点中心重建：上一锚点以来无成交则以当拍中间价重建网，有成交则中心不动。"""
+class TickMatchingTest(unittest.TestCase):
+    """撮合逐 tick、中心只随成交移动：锚点不重建中心。"""
 
-    def test_idle_anchor_recenters_to_the_current_mid(self):
-        # 开网中心 10.0（下界 9.9）；中间价带内升至 10.05，锚点重建后下界为 9.95，
-        # tick3 卖一 9.94 只有在重建后才下穿成交
+    def test_idle_anchor_keeps_the_center(self):
+        # 开网中心 10.0（下界 9.9）；中间价带内升至 10.05，tick2 为锚点但不重建，
+        # tick3 卖一 9.94 未下穿 9.9，不成交
         bid1 = np.array([10.0, 10.04, 10.04, 10.05])
         ask1 = np.array([10.0, 10.06, 10.06, 9.94])
         mid = np.array([10.0, 10.05, 10.05, 10.0])
 
         result = run_day(bid1, ask1, mid, hard_exclude=None, width=0.1,
                          anchors=np.array([0, 2]), trace=True)
-        self.assertEqual((result["buys"], result["sells"]), (1, 0))
-        kinds = [event["kind"] for event in result["events"]]
-        self.assertEqual(kinds, ["open", "recenter", "buy"])
-        self.assertAlmostEqual(result["events"][1]["center"], 10.05)
+        self.assertEqual((result["buys"], result["sells"]), (0, 0))
+        self.assertEqual([event["kind"] for event in result["events"]], ["open"])
+        self.assertAlmostEqual(result["events"][0]["center"], 10.0)
 
-    def test_anchor_after_a_fill_keeps_the_fill_center(self):
-        # tick1 成交（买 9.9，中心移 9.9）；tick2 锚点因区间内有成交而不重建
+    def test_fill_moves_the_center_to_the_boundary(self):
         bid1 = np.array([10.0, 9.85, 9.9, 9.9])
         ask1 = np.array([10.0, 9.8, 9.95, 9.95])
         mid = np.full(4, 10.0)

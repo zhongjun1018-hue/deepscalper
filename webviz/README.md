@@ -32,7 +32,7 @@ control 侧 `--checkpoint` 缺省时按 `control/runs/` 的统一训练结果命
 | 窗口统计 | 前瞻窗口对数中间价路径的实测统计（`data_provider.windows.path_stats`）；波动、路径、极差、残差和趋势位移换算为 bp，效率比和方向反转率显示为百分比 |
 | 识别概率 | `forecast.regime.classify.day_prob`：识别器输出的不利模式概率 $P$，分钟锚点行上推理；分钟 $m$ 的概率覆盖锚点之后 15 分钟的前瞻路径 |
 | 网格半宽 | 统一缓存的逐日固定半宽 $W$（`strategy.width.grid_width`，$0.1\times\operatorname{ATR}_3$） |
-| 网格回放 | `strategy.engine.run_day(trace=True)`：测试段（样本外）标签可判定的交易日，统一自可预测起点（回看窗满首分钟的锚点）起回放；对手方一档严格越界成交，成交价为触发边界；网格开启期间锚点无成交则中心重建为当拍中间价（事件 `recenter`） |
+| 网格回放 | `strategy.engine.run_day(trace=True)`：测试段（样本外）标签可判定的交易日，统一自可预测起点（回看窗满首分钟的锚点）起回放；对手方一档严格越界成交，成交价为触发边界，中心只随成交移动 |
 | 门控 | 逐分钟信号按锚点前向填充到 tick；引擎只在净持仓为 0 时读取当拍信号，空仓期间每分钟锚点复判一次，状态切换需连续 confirm_n=2 拍一致，敞口归零即刻重判并重置计数 |
 | 单日对比 | 全天开启（none）/ 识别概率过滤（prediction，$P>\tau$）两种网格方案，同日导出过 control 数据时追加第三张卡片「强化学习决策」（点击切换到贪心回放路径；卡片指标与网格方案同构，$g$ 与统一回测 agent 模式同口径） |
 | Score / 网格收益 | `strategy.metrics` 口径：$\mathrm{Score}=2\min(N_b,N_s)/N$；去量纲单日收益、收益/交易次数及当日平均网格半宽 |

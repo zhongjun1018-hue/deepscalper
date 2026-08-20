@@ -62,7 +62,7 @@ def build_markets(
 
     逐日取窗口特征（只保留进宏观通道的列）与预测的当日行块，横向拼接为
     M×(24+5)（M 为压缩分钟数，行索引即分钟索引）；缓存缺当日行时补零块，
-    cfg.use_predictions=False（GRID-NA 消融）时预测块置零。
+    cfg.use_predictions=False（GRID-NA / GRID-NHNA 消融）时预测块置零。
     """
     def window_block(date: str):
         if cache is None:
@@ -167,11 +167,10 @@ def evaluate_pooled(markets: dict[str, list[DayMarket]], policy) -> dict:
 
 def save_checkpoint(agent: BranchQAgent, cfg: Config, stats: FeatureStats | None,
                     path: str) -> None:
-    """保存（验证最优的）online 网络权重、配置、消融的固定档位与逐标的标准化统计量，
-    供回放重建同一贪心策略（加载见 control/trace.py）。"""
+    """保存（验证最优的）online 网络权重、配置与逐标的标准化统计量，供回放重建同一
+    贪心策略（加载见 control/trace.py）。"""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     torch.save({"state_dict": agent.online.state_dict(), "config": asdict(cfg),
-                "fixed_gears": agent.fixed_gears,
                 "feature_stats": stats.state_dict() if stats is not None else None},
                path)
 
@@ -181,7 +180,6 @@ def train_agent(
     markets: dict[str, dict[str, list[DayMarket]]],
     seed: int,
     hindsight: bool = True,
-    fixed_gears: tuple[int | None, int | None] = (None, None),
     log_prefix: str = "",
     tracker: Tracker | None = None,
 ) -> tuple[BranchQAgent, dict]:
@@ -190,7 +188,7 @@ def train_agent(
     markets 为 build_split_markets 的返回（已挂载逐标的标准化统计量）。
     """
     torch.set_num_threads(cfg.num_threads)
-    agent = BranchQAgent(cfg, seed=seed, fixed_gears=fixed_gears)
+    agent = BranchQAgent(cfg, seed=seed)
     episodes = interleave_episodes(markets["train"])
     offset_rng = np.random.default_rng(seed)
 
@@ -209,15 +207,15 @@ def train_agent(
             eps = cfg.epsilon_at(epoch, day_id / max(1, len(episodes)))
             while True:
                 action = agent.act(obs, eps)
-                t, priv_hist = env.t, env.priv_window(env.t)
+                minute, priv_hist = env.minute, env.priv_window(env.minute)
                 res = env.step(action_params(cfg, action))
                 agent.push(
                     Transition(
                         day_id=day_id,
-                        t=t,
+                        minute=minute,
                         action=action,
                         reward=res.train_reward,
-                        next_t=res.t if not res.done else -1,
+                        next_minute=res.minute if not res.done else -1,
                         done=res.done,
                         priv_hist=priv_hist,
                         next_priv_hist=res.priv_hist,
@@ -274,31 +272,22 @@ def train_agent(
 # --------------------------------------------------------------------------------------
 # 批量实验入口（python -m control.train）：作业矩阵展开、并行调度与结果落盘
 
-# 消融：hindsight（NH）、固定半宽档（FW，其余分支照常学习）、状态不含预测特征（NA）
+# 消融：训练奖励不含 hindsight 项（NH）、状态不含前瞻预测（NA）、两者同时去除（NHNA）
 RL_VARIANTS = {
     "GRID": {},
     "GRID-NH": {"hindsight": False},
-    "GRID-FW": {"fixed_width": 0.1},
     "GRID-NA": {"use_predictions": False},
+    "GRID-NHNA": {"hindsight": False, "use_predictions": False},
 }
 RULE_METHODS = ("HOLD", "OPEN", "SCAN")   # 无需训练、无随机种子
 
 GPU_WORKERS = 2  # 单卡下的并行作业数：作业瓶颈在 CPU 侧观测重建，少量并发即可打满
 
 
-def _variant_kwargs(method: str, cfg: Config) -> dict:
-    """将变体说明翻译为 train_agent 的参数（消融分支转为档位索引）。
-
-    use_predictions 属于 Config（影响市场构建而非训练循环），在 run_job 中作为
-    配置覆盖处理，此处剔除。
-    """
-    spec = dict(RL_VARIANTS[method])
-    spec.pop("use_predictions", None)
-    gears = (
-        cfg.widths.index(spec.pop("fixed_width")) if "fixed_width" in spec else None,
-        None,   # 数量分支不做固定消融
-    )
-    return {**spec, "fixed_gears": gears}
+def _variant_kwargs(method: str) -> dict:
+    """变体说明中属于 train_agent 的参数；use_predictions 属于 Config（影响市场构建
+    而非训练循环），在 run_job 中作为配置覆盖处理。"""
+    return {k: v for k, v in RL_VARIANTS[method].items() if k != "use_predictions"}
 
 
 def _uses_hindsight(method: str) -> bool:
@@ -381,7 +370,7 @@ def run_job(job: dict, cfg: Config) -> str:
         tracker = Tracker(cfg, run_name, job)
         try:
             agent, log = train_agent(cfg, markets, seed=seed, log_prefix=f"[{run_name}]",
-                                     tracker=tracker, **_variant_kwargs(method, cfg))
+                                     tracker=tracker, **_variant_kwargs(method))
             test = evaluate_pooled(markets["test"],
                                    lambda obs: action_params(cfg, agent.greedy(obs)))
             payload = {**test["pooled"], "per_symbol": test["per_symbol"],
@@ -410,7 +399,7 @@ def make_jobs(
 ) -> list[dict]:
     """展开 (方法 × 种子 × w × λ) 作业矩阵（每个作业内含全部标的）。
 
-    基线无需训练、与两个超参均无关；`GRID-NH` 关闭 hindsight bonus，故不随 w 展开。
+    基线无需训练、与两个超参均无关；不含 hindsight 项的变体（GRID-NH / GRID-NHNA）不随 w 展开。
     不适用的超参记为 None，作业沿用 Config 的默认值。
     """
     jobs = []

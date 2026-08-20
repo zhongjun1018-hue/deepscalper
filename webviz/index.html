@@ -679,7 +679,7 @@ function renderGrid(day) {
   }
   const current = state.gridStep ? events[state.gridStep - 1] : null;
   el('grid-time').textContent = current
-    ? `${clockAt(current.minute)} · ${current.kind === 'open' ? '建立网格' : current.kind === 'recenter' ? '重建中心' : current.kind === 'buy' ? '买入' : '卖出'} · ${state.gridStep}/${events.length}`
+    ? `${clockAt(current.minute)} · ${current.kind === 'open' ? '建立网格' : current.kind === 'buy' ? '买入' : '卖出'} · ${state.gridStep}/${events.length}`
     : `尚未建立网格 · 0/${events.length}`;
 }
 

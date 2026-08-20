@@ -88,7 +88,7 @@ def run_engine_modes(bank, classifier, threshold, symbol_id, cfg: RegimeConfig,
 
 
 def load_agent(args) -> tuple | None:
-    """加载 control 统一训练检查点，返回 (net, cfg, fixed_gears, stats, device, 检查点文件名)。
+    """加载 control 统一训练检查点，返回 (net, cfg, stats, device, 检查点文件名)。
 
     检查点缺失或不唯一时打印原因并返回 None（agent 列整体留空）。
     """
@@ -104,8 +104,8 @@ def load_agent(args) -> tuple | None:
     from control.model import resolve_device
 
     device = resolve_device(ControlConfig())
-    net, cfg, fixed_gears, stats = load_checkpoint(path, device)
-    return net, cfg, fixed_gears, stats, device, os.path.basename(path)
+    net, cfg, stats = load_checkpoint(path, device)
+    return net, cfg, stats, device, os.path.basename(path)
 
 
 def run_agent_mode(symbol, agent, args) -> list:
@@ -114,10 +114,10 @@ def run_agent_mode(symbol, agent, args) -> list:
     from control.trace import greedy_policy, prepare_test_markets
     from control.train import replay_day
 
-    net, cfg, fixed_gears, stats, device, _ = agent
+    net, cfg, stats, device, _ = agent
     test_markets = prepare_test_markets(symbol, cfg, stats,
                                         args.data_dir, args.cache_dir)
-    gears = greedy_policy(net, device, fixed_gears)
+    gears = greedy_policy(net, device)
 
     def policy(obs):
         return action_params(cfg, gears(obs))
