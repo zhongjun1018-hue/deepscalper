@@ -17,10 +17,11 @@ class BranchingTargetTest(unittest.TestCase):
         ]
         allowed = torch.tensor([True, True])
 
-        # 样本 0 半宽选可触发档：延续价值为两支均值；样本 1 选不触发档：只取半宽分支
+        # 各分支由 online 网络选档、target 网络估值。样本 0 半宽选可触发档：延续价值
+        # 为两支均值 (20+50)/2；样本 1 选不触发档：只取半宽分支 30
         value = _branching_next_value(online, target, inactive_gears=(0,),
                                       flatten_allowed=allowed)
-        torch.testing.assert_close(value, torch.tensor([40.0, 30.0]))
+        torch.testing.assert_close(value, torch.tensor([35.0, 30.0]))
 
     def test_flatten_mask_excludes_gear_zero_from_argmax(self):
         online = [
@@ -33,10 +34,10 @@ class BranchingTargetTest(unittest.TestCase):
         ]
 
         # 样本 1 净持仓为零：平仓档（半宽档 0）被掩码，argmax 落到档 1，
-        # 该档可触发，延续价值取两支均值
+        # 该档可触发，延续价值取两支均值 (40+70)/2
         value = _branching_next_value(online, target, inactive_gears=(0,),
                                       flatten_allowed=torch.tensor([True, False]))
-        torch.testing.assert_close(value, torch.tensor([40.0, 60.0]))
+        torch.testing.assert_close(value, torch.tensor([35.0, 55.0]))
 
 
 if __name__ == "__main__":
