@@ -70,7 +70,7 @@ uv sync                # torch(CUDA 12.8) / numpy / pandas / lightgbm / scikit-l
     --hindsight-weights 0.02 0.05 0.1 0.2 --inventory-lambdas 0 1 3 10 30
 
 # 超参数一次一因子探索（网络结构 / 优化 / 折扣 / 奖励塑形 / 目标网络与优先级回放，
-# 每参数约 3 档、中心点为默认配置；幂等，断点续跑）→ control/runs/sweep/
+# 中心点为默认配置，w/λ 档位同上；幂等，断点续跑）→ control/runs/sweep/
 .venv/bin/python -m control.sweep
 
 # 组合确认：只训练中心点与给定组合（值不限于梯子档位），多种子配对对照

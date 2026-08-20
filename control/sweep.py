@@ -50,9 +50,9 @@ SWEEP_LADDERS: dict[str, tuple] = {
     "batch_size": (32, 64, 128),
     # 每分钟折扣（TD 折扣为 gamma^decision_interval_min）
     "gamma": (0.98, 0.99, 0.995),
-    # 奖励塑形（design 6.2 的偏好参数）
-    "hindsight_weight": (0.05, 0.1, 0.2),
-    "inventory_lambda": (1.0, 3.0, 10.0),
+    # 奖励塑形（design 6.2 的偏好参数，档位同 control.train 的正式梯子）
+    "hindsight_weight": (0.02, 0.05, 0.1, 0.2),
+    "inventory_lambda": (0.0, 1.0, 3.0, 10.0, 30.0),
     # 目标网络与优先级回放
     "target_sync": (1000, 2000, 4000),
     "per_alpha": (0.4, 0.6, 0.8),
