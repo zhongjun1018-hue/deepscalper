@@ -180,9 +180,9 @@ class DayMarket:
         return self.atr / (RANGE_TO_SIGMA * self.pre_close)
 
     def set_stats(self, stats: FeatureStats | None) -> None:
-        """挂载标准化统计量并就地变换微观矩阵（仅调用一次）。"""
+        """挂载标准化统计量（本标的行由 symbol_id 索引）并就地变换微观矩阵（仅调用一次）。"""
         if stats is not None:
-            self.micro = stats.micro(self.micro)
+            self.micro = stats.micro(self.micro, self.symbol_id)
         self.stats = stats
 
     def sample_times(self, t: int) -> np.ndarray:
@@ -211,7 +211,7 @@ class DayMarket:
         # 行索引即分钟索引：第 m 行的窗口恰好收于分钟 m 的锚点，不含未完结数据
         macro = np.concatenate([macro, self.window[m]])
         if normalized and self.stats is not None:
-            macro = self.stats.macro(macro)
+            macro = self.stats.macro(macro, self.symbol_id)
         return macro
 
     def observe(self, t: int, priv_hist: np.ndarray) -> Observation:

@@ -9,9 +9,9 @@ PER，周期性批量更新；epoch 内均分若干评估点，在验证集上�
 
 批量入口对指定标的池执行网格 RL 的全部变体与基线：结果写入
 control/runs/<method>[_w<权重>][_lam<λ>][_seed<k>].json（测试指标逐标的报告 +
-全体等权行），RL 作业同时把验证最优的 online 网络与标准化统计量写入同名 .pt
-检查点（统一回测与 webviz 回放用，见 control/trace.py）；已存在的作业自动跳过，
-因此可安全重复执行（断点续跑）。w 与 λ 给多个值即展开为超参梯子，由
+全体等权行），RL 作业同时把验证最优的 online 网络与逐标的标准化统计量写入同名
+.pt 检查点（统一回测与 webviz 回放用，见 control/trace.py）；已存在的作业自动
+跳过，因此可安全重复执行（断点续跑）。w 与 λ 给多个值即展开为超参梯子，由
 control/summarize.py 按验证集 SR 选优（design 6.2 / 7.1）。本入口只训练 RL 自身：
 预测块（RL 状态特征之一）不在此重训，缺失时按零特征读取并提示先跑
 `python -m forecast.train`。
@@ -167,7 +167,7 @@ def evaluate_pooled(markets: dict[str, list[DayMarket]], policy) -> dict:
 
 def save_checkpoint(agent: BranchQAgent, cfg: Config, stats: FeatureStats | None,
                     path: str) -> None:
-    """保存（验证最优的）online 网络权重、配置、消融的固定档位与池化标准化统计量，
+    """保存（验证最优的）online 网络权重、配置、消融的固定档位与逐标的标准化统计量，
     供回放重建同一贪心策略（加载见 control/trace.py）。"""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     torch.save({"state_dict": agent.online.state_dict(), "config": asdict(cfg),
@@ -187,7 +187,7 @@ def train_agent(
 ) -> tuple[BranchQAgent, dict]:
     """在池化市场上训练一个分支 Q 智能体，返回（验证最优智能体, 训练日志）。
 
-    markets 为 build_split_markets 的返回（已挂载池化标准化统计量）。
+    markets 为 build_split_markets 的返回（已挂载逐标的标准化统计量）。
     """
     torch.set_num_threads(cfg.num_threads)
     agent = BranchQAgent(cfg, seed=seed, fixed_gears=fixed_gears)
@@ -328,11 +328,11 @@ def load_symbol_cache(symbol: str, cfg: Config) -> dict:
 
 
 def build_split_markets(cfg: Config) -> tuple[dict, FeatureStats | None]:
-    """按 7:1:2 切分构建全部标的的 train / val / test DayMarket 并挂载池化标准化统计量。
+    """按 7:1:2 切分构建全部标的的 train / val / test DayMarket 并挂载标准化统计量。
 
     返回（{切分段: {标的: [DayMarket]}}, 统计量）。symbol_id 与 forecast 同口径：
-    排序后标的集合中的索引；逐标的切分（异日历标的不互相泄漏）；标准化统计量在
-    全池训练段拟合一份，val/test 复用（无前视泄漏），并随检查点保存供回放侧使用。
+    排序后标的集合中的索引；逐标的切分（异日历标的不互相泄漏）；标准化统计量
+    逐标的在各自训练段拟合，val/test 复用（无前视泄漏），并随检查点保存供回放侧使用。
     """
     markets = {"train": {}, "val": {}, "test": {}}
     for symbol_id, symbol in enumerate(sorted(cfg.symbols)):

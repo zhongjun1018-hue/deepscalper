@@ -5,6 +5,8 @@
 - **模式门控网格（forecast）**：逐日价格曲线、滑动窗口统计，以及各 scheme 的网格回放事件。行情模式识别控制策略启停，且只在净持仓为 0 时切换（engine 语义）。
 - **强化学习（control）**：从统一训练检查点回放贪心决策轨迹——逐日 mid 曲线、各决策点（固定每 10 分钟锚点）的生效网格（半宽档与上下轨）、成交标记与决策点平仓事件。
 
+两个视图都在图上以竖虚线标注当日预测 / 决策起点（回看窗满的首个分钟锚点）。
+
 ## 使用
 
 ```bash
@@ -40,7 +42,7 @@ control 侧 `--checkpoint` 缺省时按 `control/runs/` 的统一训练结果命
 | 内容 | 口径 |
 | --- | --- |
 | mid 曲线 | 连续竞价快照的一档中间价（复用价格曲线绘制，`price` 字段即 mid） |
-| 市场构建 | `control.train.build_markets`（窗口特征 + LightGBM 预测，缺块补零）；标准化统计量为统一训练在全池训练段拟合的一份，随检查点加载 |
+| 市场构建 | `control.train.build_markets`（窗口特征 + LightGBM 预测，缺块补零）；标准化统计量为统一训练逐标的在训练段拟合，随检查点加载 |
 | 决策回放 | `control.trace.load_checkpoint` 重建网络、Config 与标准化统计量，`control.trace.trace_day` 贪心回放测试段交易日 |
 | 决策点 | `decisions`：固定每 10 分钟锚点 + 日终；`width` 为生效半宽档（$\times\operatorname{ATR}_3$，0 表示平仓回底仓、100 为关闭档），`center/upper/lower` 为生效网格中心与上下轨（平仓档为 null） |
 | 成交标记 | `fills`：`TradingEnv` 的全部成交，`kind` $\in\{\texttt{grid},\texttt{immediate},\texttt{flatten},\texttt{liquidate}\}$（区间末触发 / 决策点立即成交 / 决策点平仓 / 日终清仓，后两者按对手方一档价成交），`side` $\in\{\texttt{buy},\texttt{sell}\}$，`qty` 以手计 |

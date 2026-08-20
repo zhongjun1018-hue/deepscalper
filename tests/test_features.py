@@ -2,8 +2,11 @@ import unittest
 
 import numpy as np
 
-from control.features import (BAR_DIM, MICRO_DIM, MICRO_LOB_DIM, build_macro_features,
-                              build_micro_matrix)
+from control.config import Config
+from control.env import DayMarket
+from control.features import (BAR_DIM, MACRO_DIM, MICRO_DIM, MICRO_LOB_DIM,
+                              build_macro_features, build_micro_matrix,
+                              fit_feature_stats)
 from synthetic import synthetic_day
 
 
@@ -39,6 +42,24 @@ class MicroMatrixTest(unittest.TestCase):
         book = self.micro[:, MICRO_LOB_DIM:]
         np.testing.assert_allclose(book[:, 9], 0.0)
         np.testing.assert_allclose(book[:, 10], 0.0)
+
+
+class FeatureStatsTest(unittest.TestCase):
+    """fit_feature_stats：逐标的拟合统计量，行索引即 symbol_id。"""
+
+    def test_rows_are_fitted_per_symbol(self):
+        cfg = Config(symbols=("000001", "000002"))
+        first = DayMarket(synthetic_day(), cfg, symbol_id=0)
+        second = DayMarket(synthetic_day(), cfg, symbol_id=1)
+        second.micro = second.micro * 2.0 + 1.0   # 制造跨标的量纲差异
+        stats = fit_feature_stats([first, second], cfg)
+
+        self.assertEqual(stats.micro_mean.shape, (2, MICRO_DIM))
+        self.assertEqual(stats.macro_mean.shape, (2, MACRO_DIM))
+        np.testing.assert_allclose(stats.micro_mean[1],
+                                   stats.micro_mean[0] * 2.0 + 1.0, atol=1e-6)
+        np.testing.assert_allclose(stats.macro_mean[1], stats.macro_mean[0],
+                                   atol=1e-6)
 
 
 class MacroFeatureTest(unittest.TestCase):

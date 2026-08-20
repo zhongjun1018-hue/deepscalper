@@ -59,7 +59,7 @@ class Config:
 
     # ---- 训练（池化日程：每 epoch 约 22 标的 × 80 日 × 24 决策 ≈ 4.4 万条转移、
     # 约 0.7 万次更新；日程与该规模绑定，经验证曲线微调）----
-    normalize: bool = True          # 基于池化训练段的 z-score 特征标准化
+    normalize: bool = True          # 逐标的基于训练段的 z-score 特征标准化
     norm_clip: float = 10.0         # 标准化后的截断阈值
     gamma: float = 0.99             # 每分钟折扣；TD 折扣恒为 gamma^decision_interval_min
     lr: float = 1e-4
@@ -128,6 +128,5 @@ class Config:
 
     def epsilon_at(self, epoch: int, progress: float) -> float:
         """epoch 内进度 progress∈[0,1) 时的探索率：前 60% 训练轮次线性退火至 eps_end。"""
-        span = max(1, int(self.epochs * 0.6))
-        ratio = min(1.0, (epoch - 1 + progress) / span)
+        ratio = min(1.0, (epoch - 1 + progress) / (self.epochs * 0.6))
         return self.eps_start + (self.eps_end - self.eps_start) * ratio

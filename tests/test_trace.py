@@ -22,7 +22,8 @@ class CheckpointRoundTripTest(unittest.TestCase):
     def test_config_weights_gears_and_stats_survive_the_roundtrip(self):
         cfg = Config(symbols=("301308",))
         net = BranchQNetwork(cfg)
-        stats = FeatureStats(np.zeros(66), np.ones(66), np.zeros(40), np.ones(40),
+        stats = FeatureStats(np.zeros((1, 66)), np.ones((1, 66)),
+                             np.zeros((1, 40)), np.ones((1, 40)),
                              clip=cfg.norm_clip)
         with tempfile.TemporaryDirectory() as folder:
             path = os.path.join(folder, "GRID-FW_w0.1_lam3_seed0.pt")

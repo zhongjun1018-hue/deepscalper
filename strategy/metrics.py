@@ -2,7 +2,7 @@
 
 财务指标以逐日超额收益序列为基础（日频不年化，design 7.3）；summarize 把统一回测的
 逐日记录汇总为以去量纲网格收益 g 为主的同一套指标（docs/grid_profit.md §七 的
-费用后口径，design 8.4），各模式可直接对比。
+费用后口径，design 8.5），各模式可直接对比。
 """
 
 from __future__ import annotations
@@ -49,7 +49,7 @@ def summarize(days: list[dict]) -> dict[str, float]:
     """逐日记录的统一汇总：费用后网格收益 g + 日均闭环率 / 成交次数 / 宽幅。
 
     days 元素为 {g, n_buys, n_sells, closure_rate, width_rel}。g 以当日基准
-    格距 W_d 归一（design 8.4）；width_rel 为当日时间加权生效半宽 / 当日开盘价，
+    格距 W_d 归一（design 8.5）；width_rel 为当日时间加权生效半宽 / 当日开盘价，
     无网格触发时间的日记 NaN。NaN 字段的矩均按有值日计。
 
     闭环率与买卖笔数各报两个口径（design 8.5）：mean_* 为逐日等权均值（分母含

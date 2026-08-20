@@ -88,7 +88,7 @@ def run_engine_modes(bank, classifier, threshold, symbol_id, cfg: RegimeConfig,
 
 
 def load_agent(args) -> tuple | None:
-    """加载 control 统一训练检查点，返回 (net, cfg, fixed_gears, stats, device)。
+    """加载 control 统一训练检查点，返回 (net, cfg, fixed_gears, stats, device, 检查点文件名)。
 
     检查点缺失或不唯一时打印原因并返回 None（agent 列整体留空）。
     """

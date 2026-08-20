@@ -61,7 +61,7 @@ def load_checkpoint(path: str, device) -> tuple[BranchQNetwork, Config,
                                                 FeatureStats | None]:
     """加载 control/train.py save_checkpoint 保存的检查点（eval 模式）。
 
-    返回（网络, 配置, 消融的固定档位, 池化标准化统计量）；固定档位经 greedy_policy
+    返回（网络, 配置, 消融的固定档位, 逐标的标准化统计量）；固定档位经 greedy_policy
     套用，回放才与训练评估（BranchQAgent.greedy）同一口径；统计量随检查点保存，
     回放侧不重新拟合（prepare_test_markets）。
     """
@@ -103,8 +103,9 @@ def prepare_test_markets(symbol: str, cfg: Config, stats: FeatureStats | None,
                          cache_dir: str = "cache") -> list[DayMarket]:
     """按 7:1:2 切分构建一个标的的测试段回放市场并挂载检查点的标准化统计量。
 
-    统计量来自检查点（统一训练在全池训练段拟合，无前视泄漏）；symbol_id 与
-    forecast 同口径：排序后标的集合中的索引。
+    统计量来自检查点（统一训练逐标的在训练段拟合，无前视泄漏）；symbol_id 与
+    forecast 同口径：排序后标的集合中的索引，也是统计量的行索引。标的须在检查点
+    的训练集合中——embedding 与标准化统计量都按该集合定义，集合外无从回放。
     """
     from data_provider.split import chronological_split
     from data_provider.ticks import load_days
@@ -112,12 +113,15 @@ def prepare_test_markets(symbol: str, cfg: Config, stats: FeatureStats | None,
 
     from .train import build_markets
 
+    if symbol not in cfg.symbols:
+        raise ValueError(f"标的 {symbol} 不在检查点的训练集合中，无法回放"
+                         "（symbol embedding 与标准化统计量按训练集合定义）。")
     days = load_days(symbol, data_dir, cfg.window.atr_window)
     split = chronological_split([d.date for d in days])
     test_days = [d for d in days if d.date in set(split.test)]
     cache = load_cache(symbol, data_dir=data_dir, cache_dir=cache_dir,
                        spec=cfg.window, zero_nan=True)
-    symbol_id = sorted(cfg.symbols).index(symbol) if symbol in cfg.symbols else 0
+    symbol_id = sorted(cfg.symbols).index(symbol)
     test_markets = build_markets(test_days, cfg, cache, symbol_id)
     for market in test_markets:
         market.set_stats(stats)

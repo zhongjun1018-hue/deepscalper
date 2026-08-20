@@ -14,7 +14,7 @@ strategy.engine.run_day(trace=True)（锚点门控 + 连续确认，只在净持
 网格回放只覆盖测试段（样本外），其余日期仅导出价格与窗口。
 
 control 数据源：control.trace.load_checkpoint 重建统一训练的网络、Config、消融的
-固定档位与池化标准化统计量，greedy_policy 构建贪心策略，prepare_test_markets 构建
+固定档位与逐标的标准化统计量，greedy_policy 构建贪心策略，prepare_test_markets 构建
 测试段市场；逐测试日 control.trace.trace_day 贪心回放（定长决策），单日摘要与门控
 卡片同指标口径（g = 超额收益 × B / W_d，与 strategy.backtest 的 agent 模式一致）。
 """

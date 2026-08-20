@@ -58,10 +58,11 @@ PRIV_RAW_DIM = 12
 
 
 class FeatureStats:
-    """基于训练集拟合的 z-score 标准化统计量（微观 66 维 + 宏观 40 维）。
+    """逐标的在训练集上拟合的 z-score 标准化统计量（微观 66 维 + 宏观 40 维）。
 
-    仅用池化训练交易日拟合，验证 / 测试集复用同一统计量，避免未来信息泄漏；
-    统计量随检查点保存，回放侧不重新拟合。
+    各数组形状为 (n_symbols, dim)，行索引即 symbol_id（排序后标的集合中的索引）：
+    每个标的只用自己的训练交易日拟合，验证 / 测试集复用同一统计量，避免未来信息
+    泄漏；统计量随检查点保存，回放侧不重新拟合。
     """
 
     def __init__(self, micro_mean, micro_std, macro_mean, macro_std, clip: float):
@@ -69,11 +70,13 @@ class FeatureStats:
         self.macro_mean, self.macro_std = macro_mean, macro_std
         self.clip = clip
 
-    def micro(self, x: np.ndarray) -> np.ndarray:
-        return np.clip((x - self.micro_mean) / self.micro_std, -self.clip, self.clip).astype(np.float32)
+    def micro(self, x: np.ndarray, symbol_id: int) -> np.ndarray:
+        return np.clip((x - self.micro_mean[symbol_id]) / self.micro_std[symbol_id],
+                       -self.clip, self.clip).astype(np.float32)
 
-    def macro(self, x: np.ndarray) -> np.ndarray:
-        return np.clip((x - self.macro_mean) / self.macro_std, -self.clip, self.clip).astype(np.float32)
+    def macro(self, x: np.ndarray, symbol_id: int) -> np.ndarray:
+        return np.clip((x - self.macro_mean[symbol_id]) / self.macro_std[symbol_id],
+                       -self.clip, self.clip).astype(np.float32)
 
     def state_dict(self) -> dict:
         """检查点序列化：均值 / 标准差存为张量（torch.load 默认只接受权重类对象）。"""
@@ -91,7 +94,7 @@ class FeatureStats:
 
 
 class _Moments:
-    """流式均值 / 标准差累加器：池化拟合无需在内存中拼接全部样本行。"""
+    """流式均值 / 标准差累加器：拟合无需在内存中拼接全部样本行。"""
 
     def __init__(self):
         self.count = 0
@@ -110,18 +113,22 @@ class _Moments:
 
 
 def fit_feature_stats(markets, cfg) -> FeatureStats:
-    """在（池化的）训练 markets 上拟合特征统计量。
+    """在训练 markets 上逐标的拟合特征统计量（行索引即 symbol_id）。
 
     宏观统计量在固定分钟锚点网格 sample_points 上拟合，与决策相位无关（训练起点
     随机偏移不影响标准化口径）；微观特征抽样以控制内存。
     """
-    micro, macro = _Moments(), _Moments()
+    micro = [_Moments() for _ in range(cfg.n_symbols)]
+    macro = [_Moments() for _ in range(cfg.n_symbols)]
     for m in markets:
-        micro.add(m.micro[::4])
-        macro.add([m.macro_at(t, normalized=False) for t in m.sample_points])
-    micro_mean, micro_std = micro.stats()
-    macro_mean, macro_std = macro.stats()
-    return FeatureStats(micro_mean, micro_std, macro_mean, macro_std,
+        micro[m.symbol_id].add(m.micro[::4])
+        macro[m.symbol_id].add([m.macro_at(t, normalized=False) for t in m.sample_points])
+    micro_stats = [moments.stats() for moments in micro]
+    macro_stats = [moments.stats() for moments in macro]
+    return FeatureStats(np.stack([mean for mean, _ in micro_stats]),
+                        np.stack([std for _, std in micro_stats]),
+                        np.stack([mean for mean, _ in macro_stats]),
+                        np.stack([std for _, std in macro_stats]),
                         clip=cfg.norm_clip)
 
 

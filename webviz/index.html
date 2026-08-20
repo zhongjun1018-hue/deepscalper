@@ -472,6 +472,22 @@ function drawAxes(svg, scales) {
 
 }
 
+function drawStartLine(svg, day, scales) {
+  // 每日预测 / 决策自回看窗满的首个锚点开始，在该时点画一根竖线标注起点
+  const rl = state.algorithm === 'control' || (state.strategy === 'rl' && day.rl);
+  const minute = rl ? day.rl?.decisions?.[0]?.minute
+    : (day.t0 >= 0 ? day.t0 : day.windows?.[0]?.start);
+  if (!Number.isFinite(minute)) return;
+  const x = scales.x(minute);
+  const layer = node('g', {}, svg);
+  node('line', { x1: x, x2: x, y1: CHART.top, y2: CHART.top + scales.plotHeight,
+                 stroke: 'var(--gate-edge)', 'stroke-width': 1,
+                 'stroke-dasharray': '5 4' }, layer);
+  const label = node('text', { x, y: CHART.top - 8, 'text-anchor': 'middle',
+                               fill: 'var(--gate-edge)', 'font-size': 11.5 }, layer);
+  label.textContent = `${rl ? '决策起点' : '预测起点'} ${clockAt(minute)}`;
+}
+
 function drawWindows(svg, day, scales, options) {
   const layer = node('g', {}, svg);
   const item = day.windows[state.selected];
@@ -907,6 +923,7 @@ function renderChart(day) {
   if (state.algorithm === 'control' || (state.strategy === 'rl' && day.rl)) {
     drawRlBands(svg, day, scales, state.gridStep);
     drawAxes(svg, scales);
+    drawStartLine(svg, day, scales);
     drawPrice(svg, day, scales);
     drawRlMarks(svg, day, scales, state.gridStep);
   } else {
@@ -914,6 +931,7 @@ function renderChart(day) {
     if (grid) drawGridState(svg, day, scales, grid, state.gridStep);
     drawWindows(svg, day, scales, { grid: el('show-grid').checked, trend: el('show-trend').checked });
     drawAxes(svg, scales);
+    drawStartLine(svg, day, scales);
     drawPrice(svg, day, scales);
     attachSelection(svg, day, scales);
   }
