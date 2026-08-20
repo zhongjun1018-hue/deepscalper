@@ -1,4 +1,5 @@
-"""汇总实验结果：输出测试集汇总表与行情状态，并按验证集 SR 选定超参 (w, λ)。
+"""汇总实验结果（python -m control.summarize）：输出测试集汇总表与行情状态，
+并按验证集 SR 选定超参 (w, λ)。
 
 结果组织在 control/runs/<symbol>/ 下（7:1:2 单次时序切分）。超参选优只用验证集，
 在全部标的与种子上对 val_SR 取均值后逐方法取同一档：λ 与 w 都是无量纲的偏好参数，
@@ -14,7 +15,7 @@ import os
 
 import pandas as pd
 
-METHODS = ["HOLD", "OPEN", "SCAN", "GRID-FW", "GRID-NH", "GRID"]
+METHODS = ["HOLD", "OPEN", "SCAN", "GRID-FW", "GRID-NH", "GRID-NA", "GRID"]
 METRICS = ["TR", "SR", "CR", "SoR"]
 RULE_METHODS = {"HOLD", "OPEN", "SCAN"}
 

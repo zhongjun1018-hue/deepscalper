@@ -16,8 +16,8 @@ def run_day(bid1, ask1, mid, hard_exclude, width, *, decide_interval=1, trace=Fa
     信号：空仓期间每 decide_interval 个 tick 判一次；一旦成交，持仓途中的信号变化都不
     生效，直到敞口归零才立即重判，并从该 tick 重新计时。
 
-    返回 buys / sells 与无量纲、不含费用的 grid_profit / grid_profit_lower
-    （特征标签与形态评分的定义口径；成本由 strategy/backtest.py 叠加）。
+    返回 buys / sells 与无量纲、不含费用的 grid_profit
+    （特征标签与形态评分的定义口径；成本由 strategy/costs.py 叠加）。
     trace=True 时附带逐事件轨迹 events（webviz 依赖该结构）。
     """
     if len({len(bid1), len(ask1), len(mid)}) != 1:
@@ -102,7 +102,6 @@ def run_day(bid1, ask1, mid, hard_exclude, width, *, decide_interval=1, trace=Fa
         "buys": buys,
         "sells": sells,
         "grid_profit": float(grid_profit),
-        "grid_profit_lower": float(0.5 * (trades - exposure ** 2) - abs(exposure)),
     }
     if trace:
         result["events"] = events

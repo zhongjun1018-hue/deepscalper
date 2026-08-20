@@ -1,9 +1,61 @@
+import os
+import tempfile
 import unittest
+from types import SimpleNamespace
+
+import numpy as np
+import torch
 
 from data_provider.ticks import load_days
+from data_provider.windows import WindowSpec
 from control.config import Config
-from control.env import DayMarket
-from control.trace import trace_day
+from control.env import DayMarket, Observation
+from control.features import MACRO_DIM, MICRO_DIM, PRIVATE_DIM
+from control.model import BDQNetwork
+from control.trace import greedy_policy, load_checkpoint, trace_day
+from control.train import save_checkpoint
+
+
+class CheckpointRoundTripTest(unittest.TestCase):
+    """save_checkpoint → load_checkpoint 往返：权重与固定档位一致，嵌套 WindowSpec 还原为 dataclass。"""
+
+    def test_config_weights_and_fixed_gears_survive_the_roundtrip(self):
+        cfg = Config(symbols=("301308",))
+        net = BDQNetwork(cfg)
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "GRID-FW_w0.1_lam3_seed0.pt")
+            save_checkpoint(SimpleNamespace(online=net, fixed_gears=(2, None)), cfg, path)
+            restored, loaded_cfg, fixed_gears = load_checkpoint(path, torch.device("cpu"))
+
+        self.assertIsInstance(loaded_cfg.window, WindowSpec)
+        self.assertEqual(loaded_cfg, cfg)
+        self.assertEqual(fixed_gears, (2, None))   # 消融的固定档位随检查点往返
+        for name, weight in net.state_dict().items():
+            torch.testing.assert_close(restored.state_dict()[name], weight)
+
+
+class GreedyPolicyTest(unittest.TestCase):
+    """greedy_policy：网络前向取各分支 argmax 档位，固定分支恒用指定档（消融口径）。"""
+
+    def make_obs(self, cfg: Config) -> Observation:
+        return Observation(
+            micro_lob=np.zeros((cfg.micro_steps, MICRO_DIM), dtype=np.float32),
+            private=np.zeros((cfg.micro_steps, PRIVATE_DIM), dtype=np.float32),
+            macro=np.zeros(MACRO_DIM, dtype=np.float32))
+
+    def test_gears_are_valid_and_fixed_branch_is_respected(self):
+        cfg = Config(symbols=("301308",))
+        net = BDQNetwork(cfg).eval()
+        obs = self.make_obs(cfg)
+        device = torch.device("cpu")
+
+        width_gear, size_gear = greedy_policy(net, device, (None, None))(obs)
+        self.assertIn(width_gear, range(cfg.n_width))
+        self.assertIn(size_gear, range(cfg.n_size))
+
+        fixed_width = cfg.widths.index(0.1)
+        self.assertEqual(greedy_policy(net, device, (fixed_width, None))(obs)[0],
+                         fixed_width)
 
 
 class TraceDayTest(unittest.TestCase):
@@ -43,8 +95,9 @@ class TraceDayTest(unittest.TestCase):
         self.assertTrue(fills)
         signed = 0.0
         for f in fills:
-            self.assertEqual(set(f), {"t", "side", "price", "qty"})
+            self.assertEqual(set(f), {"t", "side", "price", "qty", "kind"})
             self.assertIn(f["side"], ("buy", "sell"))
+            self.assertIn(f["kind"], ("grid", "immediate", "flatten", "liquidate"))
             self.assertGreater(f["price"], 0.0)
             self.assertGreater(f["qty"], 0.0)
             signed += f["qty"] if f["side"] == "buy" else -f["qty"]
@@ -52,16 +105,19 @@ class TraceDayTest(unittest.TestCase):
         self.assertAlmostEqual(signed, 0.0, delta=1e-9)
 
     def test_log_matches_the_recorded_events(self):
-        log = self.result["log"]
+        log, fills = self.result["log"], self.result["fills"]
 
         self.assertEqual(log["n_decisions"], len(self.result["decisions"]))
-        # env.fills 只含网格成交；fills 另含日终扫单补记，不少于前者
-        self.assertGreaterEqual(len(self.result["fills"]), log["n_fills"])
+        # fills 含全部成交，log 的成交口径只计日内主动成交（7.4）
+        liquidate = [f for f in fills if f["kind"] == "liquidate"]
+        self.assertEqual(len(fills) - len(liquidate), log["n_fills"])
         self.assertEqual(log["n_buys"] + log["n_sells"], log["n_fills"])
+        self.assertAlmostEqual(log["liquidated_lots"],
+                               sum(f["qty"] for f in liquidate), delta=1e-9)
 
 
 class TraceFlattenTest(unittest.TestCase):
-    """平仓档（width == 0）的扫单补记：偏离底仓即平仓，fills 与环境记账守恒。"""
+    """平仓档（width == 0）的扫单：偏离底仓即平仓，成交守恒且计入日内成交口径。"""
 
     @classmethod
     def setUpClass(cls):
@@ -87,10 +143,23 @@ class TraceFlattenTest(unittest.TestCase):
                 self.assertIsNone(d["upper"])
                 self.assertIsNone(d["lower"])
                 self.assertEqual(d["size"], 0)
-        sweep_fills = [f for f in fills if f["t"] in flatten_ticks]
-        self.assertTrue(sweep_fills)   # 平仓扫单按逐档均价补记在决策点上
+        flatten = [f for f in fills if f["kind"] == "flatten"]
+        self.assertTrue(flatten)   # 平仓扫单按逐档均价记在决策点上
+        self.assertTrue(all(f["t"] in flatten_ticks for f in flatten))
         signed = sum(f["qty"] if f["side"] == "buy" else -f["qty"] for f in fills)
         self.assertAlmostEqual(signed, 0.0, delta=1e-9)
+
+    def test_intraday_flatten_counts_but_day_end_liquidation_does_not(self):
+        log = self.result["log"]
+        flatten = [f for f in self.result["fills"] if f["kind"] == "flatten"]
+
+        # 日内平仓是主动成交，计入买卖笔数与闭环率；日终清仓只报告手数（7.4）
+        self.assertEqual(log["n_flatten"], len(flatten))
+        self.assertAlmostEqual(log["flattened_lots"],
+                               sum(f["qty"] for f in flatten), delta=1e-9)
+        grid = [f for f in self.result["fills"] if f["kind"] in ("grid", "immediate")]
+        self.assertEqual(log["n_fills"], len(grid) + len(flatten))
+        self.assertGreater(log["closure_rate"], 0.0)
 
 
 if __name__ == "__main__":

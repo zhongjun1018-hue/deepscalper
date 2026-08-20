@@ -11,26 +11,25 @@ forecast.signals.build_gate_masks；网格事件 strategy.engine.run_day(trace=T
 （门控只在净持仓为 0 时生效）。网格回放只覆盖 7:1:2 切分的测试段（样本外），其余日期
 仅导出价格与窗口。
 
-control 数据源：control.trace.load_checkpoint 重建网络与 Config；市场按 control/train.py build_markets
-构建、control.features.fit_feature_stats 仅在训练段拟合（切分 data_provider.split.chronological_split）；
-逐测试日 control.trace.trace_day 贪心回放。
+control 数据源：control.trace.load_checkpoint 重建网络、Config 与消融的固定档位，
+greedy_policy 构建贪心策略，prepare_test_markets 构建测试段市场（训练段拟合标准化
+统计量）；逐测试日 control.trace.trace_day 贪心回放。
 """
 
 from __future__ import annotations
 
 import argparse
-import glob
 import json
 import os
 
 import numpy as np
 
 from data_provider.split import chronological_split
-from data_provider.ticks import load_days, minute_index, minute_labels
+from data_provider.ticks import list_symbols, load_days, minute_index, minute_labels
 from data_provider.windows import TARGET_NAMES, load_cache, path_stats
 from forecast.config import Config as ForecastConfig
 from forecast.signals import GATES, GATE_RULES, SCHEMES, build_gate_masks
-from strategy import engine
+from strategy import engine, metrics
 
 DISPLAY_PATH_NAMES = ["rv", "path_len", "range_rel", "resid_abs_mean", "resid_abs_q90",
                       "abs_slope", "er", "rev_rate"]
@@ -170,10 +169,9 @@ def build_grid(table: dict, width: float, t0: int, hard_exclude,
         "buys": int(result["buys"]),
         "sells": int(result["sells"]),
         "trades": int(trades),
-        "score": (round(float(2 * min(result["buys"], result["sells"]) / trades), 6)
+        "score": (round(metrics.closure_rate(result["buys"], result["sells"]), 6)
                   if trades else None),
         "grid_profit": round(result["grid_profit"], 6),
-        "grid_profit_lower": round(result["grid_profit_lower"], 6),
         "profit_per_trade": round(result["grid_profit"] / trades, 6) if trades else None,
         "gated_minutes": int(round(sum(end - start for start, end in excluded))),
         "evaluated_minutes": int(round(float(table["x"][-1] - table["x"][t0]))),
@@ -225,16 +223,15 @@ def export_forecast_symbol(symbol: str, args, cfg: ForecastConfig) -> dict:
             "preclose": round(float(table["preclose"]), 4),
             "x": [round(float(v), 3) for v in table["x"]],
             "price": [round(float(v), 4) for v in table["lastpx"]],
-            "closing_x": [],
-            "closing_price": [],
             "windows": build_windows(table, cache["preds"][i], width, cfg),
         }
         if i in candidate_set and width is not None:
-            # 当日首个有预测的样本行（oracle 真值与预测值同一行集），回放自其次一 tick 起
+            # 有可判定预测的交易日才回放（oracle 真值与预测值同一行集），
+            # 统一自可预测起点（回看窗满的 lookback_ticks）起
             usable = (np.isfinite(cache["targets"][i]).all(axis=1)
                       & np.isfinite(cache["preds"][i]).any(axis=1))
             if usable.any():
-                t0 = int(np.flatnonzero(usable).min()) + 1
+                t0 = cfg.window.lookback_ticks
                 grids = {"none": build_grid(table, width, t0, None, cfg.stride_ticks)}
                 for gate in GATES:
                     grids[gate] = {
@@ -252,73 +249,25 @@ def export_forecast_symbol(symbol: str, args, cfg: ForecastConfig) -> dict:
             "dates": [str(date) for date in dates], "replay_dates": replay_dates}
 
 
-def resolve_checkpoint(symbol: str, args, parser) -> str:
-    """控制器检查点路径：--checkpoint 显式给定，否则按 control/runs 的结果命名规则解析。
-
-    完整名为 <method>_w<w>_lam<λ>_seed<s>.pt（w/λ 缺省取 control Config 默认值）；run_all 的
-    命名规则是不适用的超参不在文件名中（如 GRID-NH 无 w 标签），完整名未命中时退到
-    <method>*_seed<s>.pt 的唯一匹配。
-    """
-    if args.checkpoint:
-        path = args.checkpoint
-    else:
-        from control.config import Config as ControlConfig
-        defaults = ControlConfig()
-        w = defaults.hindsight_weight if args.w is None else args.w
-        lam = defaults.inventory_lambda if args.lam is None else args.lam
-        folder = os.path.join(defaults.result_dir, symbol)
-        path = os.path.join(folder, f"{args.method}_w{w:g}_lam{lam:g}_seed{args.seed}.pt")
-        if not os.path.exists(path):
-            matches = sorted(glob.glob(os.path.join(
-                folder, f"{args.method}_*_seed{args.seed}.pt")))
-            if len(matches) == 1:
-                path = matches[0]
-            elif len(matches) > 1:
-                parser.error(f"{symbol} 的 {args.method} 检查点不唯一："
-                             + "、".join(os.path.basename(m) for m in matches)
-                             + "；请用 --w/--lam 或 --checkpoint 明确指定。")
-    if not os.path.exists(path):
-        parser.error(f"未找到 {symbol} 的 RL 检查点：{path}。"
-                     "请先运行 scripts/run_all.py 完成训练（断点续跑会复用已有产物），"
-                     "或用 --checkpoint 显式指定检查点路径。")
-    return path
-
-
 def export_control_symbol(symbol: str, args, parser) -> dict:
     """从控制器检查点回放测试段的贪心决策轨迹并导出，返回 index.json 的符号条目。"""
-    import torch
-
     from control.config import Config as ControlConfig
-    from control.features import fit_feature_stats
-    from control.model import resolve_device, to_batch
-    from control.trace import load_checkpoint, trace_day
-    from control.train import build_markets
+    from control.model import resolve_device
+    from control.trace import (greedy_policy, load_checkpoint,
+                               prepare_test_markets, resolve_checkpoint,
+                               trace_day)
 
-    path = resolve_checkpoint(symbol, args, parser)
+    try:
+        path = resolve_checkpoint(symbol, args.method, args.seed, args.w, args.lam,
+                                  args.checkpoint)
+    except (FileNotFoundError, ValueError) as exc:
+        parser.error(str(exc))
     device = resolve_device(ControlConfig())
-    net, cfg = load_checkpoint(path, device)
-
-    days = load_days(symbol, args.data_dir, cfg.window.atr_window)
-    split = chronological_split([d.date for d in days])
-    train_days = [d for d in days if d.date in set(split.train)]
-    test_days = [d for d in days if d.date in set(split.test)]
-    cache = load_cache(symbol, data_dir=args.data_dir, cache_dir=args.cache_dir,
-                       spec=cfg.window, zero_nan=True)
-    # symbol_id 与 forecast 同口径：排序后标的集合中的索引
-    symbol_id = sorted(cfg.symbols).index(symbol) if symbol in cfg.symbols else 0
-    train_m = build_markets(train_days, cfg, cache, symbol_id)
-    test_m = build_markets(test_days, cfg, cache, symbol_id)
-    # 仅用训练集拟合标准化统计量，测试段复用（无前视泄漏，与 run_all 同一口径）
-    stats = fit_feature_stats(train_m, cfg) if cfg.normalize else None
-    for market in train_m + test_m:
-        market.set_stats(stats)
+    net, cfg, fixed_gears = load_checkpoint(path, device)
+    test_days, test_m = prepare_test_markets(symbol, cfg, args.data_dir, args.cache_dir)
     tables = {d.date: day_table(d) for d in test_days}
-    del days, train_days, train_m
-
-    def policy(obs):
-        with torch.no_grad():
-            q = net(*to_batch([obs], device))
-        return int(q[0].argmax(-1).item()), int(q[1].argmax(-1).item())
+    del test_days
+    policy = greedy_policy(net, device, fixed_gears)
 
     out_dir = os.path.join(args.out_dir, "control", symbol)
     os.makedirs(out_dir, exist_ok=True)
@@ -342,6 +291,7 @@ def export_control_symbol(symbol: str, args, parser) -> dict:
             "side": f["side"],
             "price": round(float(f["price"]), 4),
             "qty": float(f["qty"]),
+            "kind": f["kind"],
         } for f in result["fills"]]
         write_json(os.path.join(out_dir, f"{market.date}.json"), {
             "symbol": symbol,
@@ -349,8 +299,6 @@ def export_control_symbol(symbol: str, args, parser) -> dict:
             "preclose": round(float(market.pre_close), 4),
             "x": [round(float(v), 3) for v in table["x"]],
             "price": [round(float(v), 4) for v in market.mid],
-            "closing_x": [],
-            "closing_price": [],
             "decisions": decisions,
             "fills": fills,
             "log": result["log"],
@@ -379,16 +327,17 @@ def forecast_params(cfg: ForecastConfig) -> dict:
 
 
 def update_index(out_dir: str, algorithm: str, entries: list, params: dict | None = None) -> None:
-    """合并写 index.json：本次导出的算法段落整体替换，另一算法的既有目录保留。"""
+    """合并写 index.json：本次导出的算法段落整体替换，另一算法的既有目录与 params 保留。"""
     path = os.path.join(out_dir, "index.json")
-    index = {"algorithms": {}}
+    algorithms = {}
     if os.path.exists(path):
         with open(path) as file:
-            index = json.load(file)
-        index.setdefault("algorithms", {})
-    index["minute_labels"] = [str(label) for label in minute_labels()]
-    index["closing_minutes"] = 0   # 新数据源只含连续竞价，无收盘集合竞价段
-    index["algorithms"][algorithm] = {"symbols": entries}
+            stored = json.load(file)
+        algorithms = stored.get("algorithms", {})
+        params = params if params is not None else stored.get("params")
+    algorithms[algorithm] = {"symbols": entries}
+    index = {"algorithms": algorithms,
+             "minute_labels": [str(label) for label in minute_labels()]}
     if params is not None:
         index["params"] = params
     write_json(path, index)
@@ -397,13 +346,14 @@ def update_index(out_dir: str, algorithm: str, entries: list, params: dict | Non
 def main() -> None:
     parser = argparse.ArgumentParser(description="webviz 数据导出（forecast / control 决策回放）")
     parser.add_argument("--algorithm", choices=["forecast", "control"], required=True)
-    parser.add_argument("--symbols", nargs="+", required=True, help="标的代码")
+    parser.add_argument("--symbols", nargs="+", default=None,
+                        help="标的代码，缺省为 data 目录下全部标的")
     parser.add_argument("--data-dir", default="data")
     parser.add_argument("--cache-dir", default="cache")
     parser.add_argument("--out-dir", default=os.path.join(os.path.dirname(__file__), "data"))
     parser.add_argument("--checkpoint", default=None,
                         help="control：检查点路径（缺省按 control/runs 命名规则解析）")
-    parser.add_argument("--method", default="GRID", help="control：方法名（与 run_all 文件名一致）")
+    parser.add_argument("--method", default="GRID", help="control：方法名（与 control.train 文件名一致）")
     parser.add_argument("--seed", type=int, default=0, help="control：随机种子")
     parser.add_argument("--w", type=float, default=None,
                         help="control：hindsight 权重 w（缺省取 control Config 默认值）")
@@ -411,7 +361,7 @@ def main() -> None:
                         help="control：存货惩罚 λ（缺省取 control Config 默认值）")
     args = parser.parse_args()
 
-    symbols = list(dict.fromkeys(args.symbols))
+    symbols = args.symbols or list_symbols(args.data_dir)
     if args.algorithm == "forecast":
         cfg = ForecastConfig(data_dir=args.data_dir, cache_dir=args.cache_dir)
         entries = [export_forecast_symbol(symbol, args, cfg) for symbol in symbols]

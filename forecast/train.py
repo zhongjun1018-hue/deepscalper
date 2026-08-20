@@ -4,8 +4,8 @@
 训练集跨标的池化 fit、验证集早停；训练与评估只取每 stride_ticks 一行（相邻 tick 的
 回看窗口重叠 599/600），推理则覆盖全部 tick 并回写统一缓存 cache/<symbol>.npz 的
 preds 块（控制器状态与门控回测的数据源），最后在 val/test 上评估写 runs_dir/metrics.json。
-ensure_predictions 为幂等预建入口，供 scripts/run_all.py 与冒烟主进程在进程池启动前
-串行调用。
+ensure_predictions 为幂等预建入口，供 strategy/backtest.py 在回测前调用；RL 训练
+（control.train）只读预测缓存、不在此重训。
 """
 
 from __future__ import annotations
@@ -34,22 +34,29 @@ def _with_symbol(features, index: int):
         [features, np.full(len(features), index, dtype=np.float32)]).astype(np.float32)
 
 
+def symbol_rows(entry: dict, dates, stride: int) -> tuple:
+    """单标的的 (窗口特征 (n,47), 目标 (n,5)) 有效行，逐日每 stride 个 tick 取一行。
+
+    行过滤口径：5 目标全有限 ∧ 任一窗口特征有限；窗口特征保留 NaN（LightGBM 原生处理）。
+    """
+    take = np.isin(entry["dates"], list(dates))
+    feats = entry["features"][take][:, ::stride].reshape(-1, len(FEATURE_NAMES))
+    targs = entry["targets"][take][:, ::stride].reshape(-1, len(TARGET_NAMES))
+    valid = np.isfinite(targs).all(axis=1) & np.isfinite(feats).any(axis=1)
+    return feats[valid], targs[valid]
+
+
 def training_rows(banks: dict, date_set: dict, stride: int) -> tuple:
-    """跨标的池化组装 (x (n,48) f32, y (n,5) f32)，逐日每 stride 个 tick 取一行。
+    """跨标的池化组装 (x (n,48) f32, y (n,5) f32)：symbol_id 为排序后标的集合中的索引。
 
     banks: {标的: load_cache(zero_nan=False) 的返回}；
     date_set: {标的: 该段日期集合}（逐标的切分，异日历标的不互相泄漏）。
-    行过滤口径：5 目标全有限 ∧ 任一窗口特征有限；窗口特征保留 NaN（LightGBM 原生处理）。
     """
     xs, ys = [], []
     for index, symbol in enumerate(sorted(banks)):
-        entry = banks[symbol]
-        take = np.isin(entry["dates"], list(date_set[symbol]))
-        feats = entry["features"][take][:, ::stride].reshape(-1, len(FEATURE_NAMES))
-        targs = entry["targets"][take][:, ::stride].reshape(-1, len(TARGET_NAMES))
-        valid = np.isfinite(targs).all(axis=1) & np.isfinite(feats).any(axis=1)
-        xs.append(_with_symbol(feats[valid], index))
-        ys.append(targs[valid])
+        feats, targs = symbol_rows(banks[symbol], date_set[symbol], stride)
+        xs.append(_with_symbol(feats, index))
+        ys.append(targs)
     return np.concatenate(xs), np.concatenate(ys).astype(np.float32)
 
 
@@ -122,11 +129,11 @@ def _plot_test_rows(banks, splits, symbols, model, cfg: Config) -> None:
 
     xs, ys, ids = [], [], []
     for index, symbol in enumerate(symbols):
-        x, y = training_rows({symbol: banks[symbol]},
-                             {symbol: set(splits[symbol].test)}, cfg.stride_ticks)
-        xs.append(x)
-        ys.append(y)
-        ids.append(np.full(len(x), index, dtype=np.int64))
+        feats, targs = symbol_rows(banks[symbol], set(splits[symbol].test),
+                                   cfg.stride_ticks)
+        xs.append(_with_symbol(feats, index))
+        ys.append(targs)
+        ids.append(np.full(len(feats), index, dtype=np.int64))
     prediction = model.predict(np.concatenate(xs))
     figure_dir = str(Path(cfg.runs_dir) / "figures")
     clear_result_figures(figure_dir)

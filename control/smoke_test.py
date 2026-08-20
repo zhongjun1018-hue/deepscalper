@@ -1,22 +1,20 @@
-"""冒烟测试：加载真实交易日与统一缓存，跑通网格环境与一次网络更新，并测量耗时。"""
+"""冒烟测试（python -m control.smoke_test [标的]）：加载真实交易日与统一缓存，
+跑通网格环境与一次网络更新，并测量耗时。"""
 
-import os
 import sys
 import time
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from data_provider.split import chronological_split
 from data_provider.ticks import load_days
 from data_provider.windows import load_cache
 
-from control.agent import BDQAgent
-from control.baselines import run_fixed_grid
-from control.buffer import Transition
-from control.config import Config
-from control.env import StepResult, TradingEnv, action_params
-from control.features import fit_feature_stats
-from control.train import build_markets
+from .agent import BDQAgent
+from .baselines import run_fixed_grid
+from .buffer import Transition
+from .config import Config
+from .env import StepResult, TradingEnv, action_params
+from .features import fit_feature_stats
+from .train import build_markets
 
 
 def interact(env: TradingEnv, cfg: Config, agent: BDQAgent, day_id: int = 0) -> StepResult:
@@ -41,18 +39,13 @@ def main(symbol: str):
     train_days = [d for d in days if d.date in set(split.train)]
     print(f"split: train {len(train_days)} / val {len(split.val)} / test {len(split.test)}")
 
+    # 预测块只读不重训（缺失时按零特征读取，与 control.train 同口径）
     t0 = time.time()
-    from forecast.config import Config as PredictionConfig   # 惰性导入：仅本流程需要
-    from forecast.train import ensure_predictions
-    ensure_predictions((symbol,), PredictionConfig(
-        data_dir=cfg.data_dir, cache_dir=cfg.cache_dir, symbols=(symbol,),
-        window=cfg.window,
-    ))
     cache = load_cache(symbol, data_dir=cfg.data_dir, cache_dir=cfg.cache_dir,
                        spec=cfg.window, zero_nan=True)
     print(f"unified cache: {time.time()-t0:.1f}s, {len(cache['dates'])} days")
 
-    # 仅用训练集拟合标准化统计量（与 run_all 同一口径）
+    # 仅用训练集拟合标准化统计量（与 control.train 同一口径）
     t0 = time.time()
     train_m = build_markets(train_days, cfg, cache, symbol_id=0)
     stats = fit_feature_stats(train_m, cfg) if cfg.normalize else None

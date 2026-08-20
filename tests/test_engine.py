@@ -20,7 +20,6 @@ class StrictCrossingTest(unittest.TestCase):
         # tick3 买一 10.2 恰触新上界不成交，卖一 9.8998 下穿下界 10.0 成交（买 10.0）
         self.assertEqual((result["buys"], result["sells"]), (1, 1))
         self.assertAlmostEqual(result["grid_profit"], 1.0)
-        self.assertAlmostEqual(result["grid_profit_lower"], 1.0)
 
     def test_trace_events_feed_webviz(self):
         result = run_day(
@@ -39,9 +38,9 @@ class StrictCrossingTest(unittest.TestCase):
 
 
 class GridProfitTest(unittest.TestCase):
-    """无量纲 grid_profit：0.5×(成交笔数+敞口²)+敞口浮动项；下界为 0.5×(笔数−敞口²)−|敞口|。"""
+    """无量纲 grid_profit：0.5×(成交笔数+敞口²)+敞口浮动项。"""
 
-    def test_dimensionless_profit_and_lower_bound(self):
+    def test_dimensionless_profit(self):
         result = run_day(
             bid1=np.array([10.0, 10.0, 10.0]),
             ask1=np.array([10.0, 9.8, 9.9]),
@@ -51,9 +50,6 @@ class GridProfitTest(unittest.TestCase):
         # 买入 1 笔后敞口 1 持到日终，收盘价等于开网中心（浮动项为 0）
         self.assertEqual((result["buys"], result["sells"]), (1, 0))
         self.assertAlmostEqual(result["grid_profit"], 1.0)
-        self.assertAlmostEqual(result["grid_profit_lower"], -1.0)
-        # 下界与实现值的关系：浮动项非负时实现值不低于下界
-        self.assertGreaterEqual(result["grid_profit"], result["grid_profit_lower"])
 
 
 class GateTimingTest(unittest.TestCase):

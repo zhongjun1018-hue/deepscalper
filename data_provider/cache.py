@@ -1,7 +1,7 @@
 """统一缓存预建入口：python -m data_provider.cache，跨标的并行构建 cache/<symbol>.npz。
 
 load_cache 幂等：缓存与窗口级 metadata 一致即跳过重建，中断后重跑从未完成的标的继续。
-不同标的写不同文件，跨标的并行安全（同一标的并发重建才会写坏缓存，见 scripts/run_all.py）；
+不同标的写不同文件，跨标的并行安全（同一标的并发重建才会写坏缓存，见 control.train）；
 内存峰值约为单标的构建用量 × workers，内存紧张时用 --workers 1 退回串行。
 预测块（preds）由 forecast.train 训练后回写，不属于本入口。
 """

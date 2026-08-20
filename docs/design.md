@@ -1,15 +1,15 @@
 # GridScalper 设计
 
-本文定义 GridScalper 的交易规则、两个算法的决策机制、学习目标与评估协议。实现位于 `data_provider/`、`strategy/`、`forecast/`、`control/`，实验入口位于 `scripts/`。
+本文定义 GridScalper 的交易规则、两个算法的决策机制、学习目标与评估协议。实现位于 `data_provider/`、`strategy/`、`forecast/`、`control/`，实验入口即各模块的可执行子模块（`forecast.train`、`control.train`、`control.summarize`、`strategy.backtest`、`webviz.export`）。
 
 ## 1. 目标与适用范围
 
 项目在同一数据与回测底座上研究两个算法：
 
-- **预测算法**（`forecast/`）：LightGBM 由 600-tick 窗口统计预测 5 个前瞻目标，预测值生成门控信号，控制固定 $0.1\times\mathrm{ATR}$ 网格的启停；门控只在净持仓为 0 时生效。算法本身不下单，交易由 `strategy/` 的报价驱动回放执行。
+- **预测算法**（`forecast/`）：LightGBM 由 600-tick 窗口统计预测 5 个前瞻目标，预测值生成门控信号，控制固定 $0.1\times\mathrm{ATR}_3$ 网格的启停；门控只在净持仓为 0 时生效。算法本身不下单，交易由 `strategy/` 的报价驱动回放执行。
 - **强化学习算法**（`control/`）：智能体不直接决定某一时刻买卖，而是在每个决策点自主设定整体半宽 $h$（$h=0$ 立即平回底仓，$h$ 极大等同停手）与单次成交量 $q$。参数持续生效，直到成交、超时或日终产生下一决策点，问题按 SMDP 建模。
 
-两个算法共享：同一份原始数据与缓存（`data/`、`cache/`、`data_provider/`），同一套网格几何、撮合与成本口径（`strategy/`），同一次 7:1:2 时序切分（`data_provider/split.py`）。预测算法的输出同时是强化学习的状态特征（5.4）。
+两个算法共享：同一份原始数据与缓存（`data/`、`cache/`、`data_provider/`），同一套网格几何、撮合与成本口径（`strategy/`），同一次 7:1:2 时序切分（`data_provider/split.py`），同一份统一回测与汇总口径（8.4）。预测算法的输出同时是强化学习的状态特征（5.4）。
 
 RL 框架承自 DeepScalper（Sun et al., 2022）的多模态编码器与分支 Dueling Q 网络；前瞻预测由 LightGBM 承担，网络不含预测辅助任务。本设计是快照级回测模型，不模拟交易所队列、订单撤改单消息或本策略对历史盘口的市场冲击。
 
@@ -23,17 +23,17 @@ $$
 p_t=\frac{\operatorname{bid}_{1,t}+\operatorname{ask}_{1,t}}{2}.
 $$
 
-当前两个实验标的的量级如下；每日快照数是过滤后的正常观测数量，不是数据截断下限。
+实验标的为 22 只 A 股，覆盖沪深主板、创业板与科创板，样本期 2026-02 至 2026-07（各标的 118–120 个交易日），最小变动价位均为 0.01 元。量级分布如下（先逐标的取中位数，再报跨标的分布）；每日有效快照数是过滤后的正常观测数量，不是数据截断下限。
 
-| 量 | 301308（创业板） | 688030（科创板） |
-|---|---:|---:|
-| 交易日 | 119 | 119 |
-| 价格中位数 | 380 元 | 16.3 元 |
-| $\operatorname{ATR}_3$ / 前收中位数（10%–90%） | 7.2%（4.5%–11.0%） | 4.4%（2.7%–7.0%） |
-| 一档价差中位数 | 1.8 bp | 10.9 bp |
-| 买一 / 卖一深度中位数 | 3 / 4 手 | 13.3 / 12 手 |
-| 每日有效快照数中位数 | 4741 | 3081 |
-| 最小变动价位 | 0.01 元 | 0.01 元 |
+| 量（逐标的中位数） | 最小 | 中位 | 最大 |
+|---|---:|---:|---:|
+| 价格 | 2.9 元 | 13.6 元 | 380.1 元 |
+| $\operatorname{ATR}_3$ / 前收 | 2.1% | 4.2% | 7.2% |
+| 一档价差 | 1.8 bp | 10.3 bp | 34.4 bp |
+| 买一 / 卖一深度 | 3 / 4 手 | 89 / 75 手 | 17100 / 15581 手 |
+| 每日有效快照数 | 2676 | 4444 | 4741 |
+
+标的池同时覆盖高价薄盘口（如 301308）与低价高深度（如 601288）两个极端，跨标的可比性依赖 ATR 归一与格距归一（8.4）。
 
 每日真实波幅为
 
@@ -51,7 +51,7 @@ ATR 在当日盘中恒定且不含前视。最初 3 日没有足够历史，不�
 
 ### 2.2 样本切分
 
-全项目使用同一次按时间的 7:1:2 切分（`data_provider/split.py`）：训练 70%、验证 10%、测试 20%。119 个交易日的边界为：训练 1–83，验证 84–94，测试 95–119。预测模型与 RL 智能体在同一日期切分上训练、验证与测试，样本外口径一致。单一切分下三段可能整段落在不同的市场状态，此时测试指标衡量的是跨状态外推而非泛化；每份结果同时记录三段的行情状态（7.4），作为解读测试指标的前提。
+全项目使用同一条按时间的 7:1:2 切分规则（`data_provider/split.py`）：逐标的对其交易日排序后单次切分，训练 $\lfloor 0.7n\rfloor$、验证 $\lfloor 0.1n\rfloor$，其余为测试；119 个交易日对应训练 1–83、验证 84–94、测试 95–119。预测模型与 RL 智能体在同一日期切分上训练、验证与测试，样本外口径一致。单一切分下三段可能整段落在不同的市场状态，此时测试指标衡量的是跨状态外推而非泛化；每份结果同时记录三段的行情状态（7.4），作为解读测试指标的前提。
 
 ### 2.3 交易规则假设
 
@@ -68,13 +68,13 @@ ATR 在当日盘中恒定且不含前视。最初 3 日没有足够历史，不�
 
 ### 3.1 网格几何
 
-中心为 $c$，ATR 倍数半宽为 $h$。生效半宽先取千分之一下限
+中心为 $c$，ATR 倍数半宽为 $h$，当日前收为 $C_d$。生效半宽先取千分之一下限
 
 $$
-\bar h=\max\!\left(h\operatorname{ATR}_3,\ \varepsilon c\right),\qquad \varepsilon=10^{-3},
+\bar h=\max\!\left(h\operatorname{ATR}_3,\ \varepsilon C_d\right),\qquad \varepsilon=10^{-3},
 $$
 
-下限 $\varepsilon c$ 保证单格价差不低于往返成本与滑点的量级：ATR 过小时，过密网格的每次配对必亏，该约束直接禁止这种形态。下限的参考价按执行路径取值：RL 环境内为当前网格中心 $c$（`strategy/grid.py` 的 `half_width`）；逐日固定半宽（`strategy/width.py`，预测算法与窗口特征使用）以当日前收为基准（features.md §2）。
+与 features.md §2 的 $W_d$ 同一定义。下限 $\varepsilon C_d$ 保证单格价差不低于往返成本与滑点的量级：ATR 过小时，过密网格的每次配对必亏，该约束直接禁止这种形态。RL 环境（`strategy/grid.py` 的 `half_width`）与逐日固定半宽（`strategy/width.py`，预测算法与窗口特征使用）共用同一参考价。
 
 卖出边界向上取整到合法价位，买入边界向下取整，两侧对称：
 
@@ -118,7 +118,7 @@ $$
 \operatorname{execution\_cost}=s\,q(f-p_t).
 $$
 
-现金变化为 $-s\,qf-\operatorname{fee}$。因此成交前后按中间价计量的权益损失恰为 $\operatorname{fee}+\operatorname{execution\_cost}$；两者分别统计。被动成交的执行成本包含成交后价格已经穿过挂单价所反映的逆向选择，立即成交和日终扫单则主要反映价差与档位滑点。
+现金变化为 $-s\,qf-\operatorname{fee}$。因此成交前后按中间价计量的权益损失恰为 $\operatorname{fee}+\operatorname{execution\_cost}$；两者分别统计。被动成交的执行成本包含成交后价格已经穿过挂单价所反映的逆向选择，立即成交与平仓扫单则主要反映价差与档位滑点。
 
 实际券商可能有单笔最低佣金，当前线性模型不覆盖该非线性成本；低价、小单策略在落地前必须单独评估。
 
@@ -129,10 +129,10 @@ $$
 引擎返回无量纲、不含费用的形态评分
 
 $$
-\operatorname{grid\_profit}=\frac{(N_b+N_s)+z^2}{2}+z\,\frac{y-x}{W},\qquad\operatorname{grid\_profit\_lower}=\frac{(N_b+N_s)-z^2}{2}-|z|,
+\operatorname{grid\_profit}=\frac{(N_b+N_s)+z^2}{2}+z\,\frac{y-x}{W},
 $$
 
-其中 $N_b$、$N_s$ 为买卖成交笔数、$z=N_b-N_s$ 为净持仓、$x$ 为入场价、$y$ 为日终价、$W$ 为当日半宽（推导中的格距 $d$）。完整推导见 [grid_profit.md](grid_profit.md)。该评分同时是窗口特征 `buy_count`/`sell_count`/`abs_exposure` 的标签口径；成本由 `strategy/backtest.py` 按 3.3 的费率叠加到成交流上，得到费用后净利润。
+其中 $N_b$、$N_s$ 为买卖成交笔数、$z=N_b-N_s$ 为净持仓、$x$ 为入场价、$y$ 为日终价、$W$ 为当日半宽（推导中的格距 $d$）。完整推导见 [grid_profit.md](grid_profit.md)。该回放同时是窗口特征 `buy_count`/`sell_count`/`abs_exposure` 的标签口径（features.md §3.6）；统一回测在该评分上扣除 3.3 的费用（`strategy/costs.py`），得到费用后网格收益 $g$（8.4）。
 
 ### 3.5 账户、仓位与日终（RL 环境）
 
@@ -142,7 +142,7 @@ $$
 0\le\operatorname{pos}\le2Q_0.
 $$
 
-首个决策点价格为 $p_0$，初始持仓、现金、权益和奖励基准分别为
+首个决策点（4.1）的中间价为 $p_0$，初始网格中心即 $p_0$；初始持仓、现金、权益和奖励基准分别为
 
 $$
 \operatorname{pos}_0=Q_0,\qquad\operatorname{cash}_0=Q_0p_0,\qquad E_0=2Q_0p_0,\qquad B=Q_0p_0.
@@ -150,7 +150,7 @@ $$
 
 买入量受仓位上界与现金约束；卖出量受当前持仓约束。触及边界时相应一侧关闭。
 
-决策点若新动作设置的边界已被当前对手报价穿过，该限价单按对手价立即成交；$h=0$ 时不建网格，而是按十档盘口逐档扫单，把超额敞口 $\operatorname{pos}-Q_0$ 一次性平回底仓，与日终平仓共用同一撮合路径；盘口深度不足的残余留待后续决策点或日终处理。立即成交与平仓都不产生 $\tau=0$ 的新转移，其成本计入新动作开启区间的 $C$。立即成交后中心按实际成交价重置；平仓不重置中心，网格中心只在网格成交时移动。
+决策点若新动作设置的边界已被当前对手报价穿过，该限价单按对手价立即成交；$h=0$ 时不建网格，而是按十档盘口逐档扫单，把超额敞口 $\operatorname{pos}-Q_0$ 一次性平回底仓，与日终平仓共用同一撮合路径，按逐档成交均价记一笔成交；盘口深度不足的残余留待后续决策点或日终处理。立即成交与平仓都不产生 $\tau=0$ 的新转移，其成本计入新动作开启区间的 $C$。立即成交后中心按实际成交价重置；平仓不重置中心，网格中心只在网格成交时移动。
 
 日终只平掉超额敞口 $\operatorname{pos}-Q_0$，盘口深度不足留下的终端残余按最后中间价估值。每日回合随后独立重置，不携带隔夜敞口。
 
@@ -158,13 +158,13 @@ $$
 
 ### 4.1 决策点与时长
 
-下一决策点是以下事件中最早发生者：
+每日回合自当日首个具备完整 600-tick 回看窗口的快照开始（5.3），账户与网格中心在该点按中间价 $p_0$ 初始化（3.5）。下一决策点是以下事件中最早发生者：
 
 1. 被动成交；
-2. 距当前决策点满 $K=100$ 个快照；
+2. 距当前决策点满 $K=200$ 个快照；
 3. 当日最后一个快照。
 
-区间时长 $\tau$ 以过滤后的快照索引差计量，满足 $1\le\tau\le K$。快照约每 3 秒一条，因此 $K$ 通常约为 5 分钟，但 tick 时间不是严格墙钟时间。超时机制保证 $h=0$ 与关闭档不会形成吸收态。
+区间时长 $\tau$ 以过滤后的快照索引差计量，满足 $1\le\tau\le K$。快照约每 3 秒一条，因此 $K$ 通常约为 10 分钟，但 tick 时间不是严格墙钟时间。超时机制保证 $h=0$ 与关闭档不会形成吸收态。
 
 ### 4.2 折扣
 
@@ -198,13 +198,13 @@ $h\in\{0,100\}$ 时网格不触发，$q$ 对执行无意义：训练只更新半
 
 ### 5.3 窗口统计
 
-`data_provider/windows.py` 逐 tick 预计算 600 tick 回看窗口的 47 维窗口统计（定义见 features.md §3），缓存于 `cache/<symbol>.npz`，行索引即 tick 索引，因而任一决策点都能取到恰好收于该 tick 的窗口；源数据或参数变化时缓存自动重建。宏观向量只取其中 24 维——微观序列已有逐快照原语的统计量不再重复进入（features.md §5.2）。特征中的网格成交状态由 `strategy/engine.py` 的回放给出（3.4），半宽取当日 $0.1\times\mathrm{ATR}$。
+`data_provider/windows.py` 逐 tick 预计算 600 tick 回看窗口的 47 维窗口统计（定义见 features.md §3），缓存于 `cache/<symbol>.npz`，行索引即 tick 索引，因而任一决策点都能取到恰好收于该 tick 的窗口；源数据或参数变化时缓存自动重建。宏观向量只取其中 24 维——微观序列已有逐快照原语的统计量不再重复进入（features.md §5.2）。特征中的网格成交状态由 `strategy/engine.py` 的回放给出（3.4），半宽取当日固定半宽 $W_D$（3.1 的 $\bar h$ 取 $h=0.1$）。
 
 ### 5.4 LightGBM 前瞻预测
 
 宏观向量末 5 维是 LightGBM 对五个前瞻目标的预测：path_len、rv、range_rel、resid_abs_q90 与 abs_slope，均为平方损失的均值回归；输入为 47 维窗口统计拼接 symbol_id 分类特征（features.md §3.7）。预测作为状态特征在决策时可见，预测表征的学习压力从网络移至线下模型。
 
-模型在训练段跨标的池化训练一次（各标的训练日期的并集），早停用验证日期，随后对全部交易日逐 tick 预测并回写进统一缓存 `cache/<symbol>.npz` 的 `preds`（8.2）。训练日的预测在样本内、带拟合乐观性，但不向验证/测试段泄漏；预测值只作为状态特征，不进入奖励或 TD 目标。
+模型在训练段跨标的池化训练一次（各标的训练日期的并集），早停用验证日期，随后对全部交易日逐 tick 预测并回写进统一缓存 `cache/<symbol>.npz` 的 `preds`（8.2）。训练日的预测在样本内、带拟合乐观性，但不向验证/测试段泄漏；预测值只作为状态特征，不进入奖励或 TD 目标。RL 训练只读该缓存、不触发预测重训（先运行 `forecast/train.py` 回写预测；预测块缺失时该 5 维按零读取）。
 
 ## 6. 奖励与学习
 
@@ -268,13 +268,13 @@ $$
 
 经验回放使用 proportional PER，各有效分支的平均绝对 TD 误差作为优先级。
 
-行为策略为 $\varepsilon$-greedy，探索率在前 60% 的训练轮次内由 1.0 线性退火至 0.1，评估与测试一律贪心。每 2 个决策步做一次批量更新，目标网络每 500 次更新同步一次；PER 的重要性采样指数 $\beta$ 按 $1.2\times10^{4}$ 次更新的日程从 0.4 线性升至 1.0，该日程与训练规模（80 个训练日 $\times$ 5 epochs，约 $1.1\times10^{4}$ 次更新）对齐，训练末期偏差修正基本走完。
+行为策略为 $\varepsilon$-greedy，探索率在前 60% 的训练轮次内由 1.0 线性退火至 0.1，评估与测试一律贪心。每 2 个决策步做一次批量更新，目标网络每 500 次更新同步一次；PER 的重要性采样指数 $\beta$ 按 $1.2\times10^{4}$ 次更新的日程从 0.4 线性升至 1.0。$K=200$ 下单标的训练约 $0.25$–$0.5\times10^{4}$ 次更新（约 80 个训练日 $\times$ 5 epochs，随标的快照数变化），训练结束时 $\beta$ 约走到 0.55–0.65——$K$ 的增益即在此日程下经验证集确认，日程不随决策规模重调。
 
 ## 7. 强化学习：训练、基线与评估
 
 ### 7.1 切分、选模与选参
 
-样本切分见 2.2（7:1:2 单次时序切分）。每个标的独立训练，默认 5 epochs、3 个随机种子。每个 epoch 内把训练日均分为 3 段，每段末在验证集上贪心回放一次。验证窗口仅 11 日，单点 SR 的噪声因而不可忽略；选模判据取最近 3 个评估点验证 SR 的均值而非单点最大值：单点取 max 是在验证噪声上挑选，评估点越多正偏越大（15 个独立评估点的最大值期望比均值高约 1.7 个标准差），窗口未满的评估点不参与选优。TD 损失受目标网络同步、PER 优先级与探索退火影响，不能作为收敛判据，验证曲线的点数因而决定了「是否还在改进」的可判性。$w$ 和 $\lambda$ 在全部标的与种子上聚合验证集 SR 后按方法选取同一档；测试指标不参与选模或选参，汇总表只展示锁定配置。固定参数扫描的格点预先定义，验证集选择格点，测试集报告选中格点及完整预设曲面。
+样本切分见 2.2（7:1:2 单次时序切分）。每个标的独立训练，默认 5 epochs、单个随机种子（`control.train --seeds` 可扩展多种子）。每个 epoch 内把训练日均分为 3 段，每段末在验证集上贪心回放一次。验证窗口仅约 11 日，单点 SR 的噪声因而不可忽略；选模判据取最近 3 个评估点验证 SR 的均值而非单点最大值：单点取 max 是在验证噪声上挑选，评估点越多正偏越大（15 个独立评估点的最大值期望比均值高约 1.7 个标准差），窗口未满的评估点不参与选优。TD 损失受目标网络同步、PER 优先级与探索退火影响，不能作为收敛判据，验证曲线的点数因而决定了「是否还在改进」的可判性。$w$ 和 $\lambda$ 在全部标的与种子上聚合验证集 SR 后按方法选取同一档；测试指标不参与选模或选参，汇总表只展示锁定配置。固定参数扫描的格点预先定义，验证集选择格点，测试集报告选中格点及完整预设曲面。
 
 ### 7.2 基线与消融
 
@@ -285,6 +285,7 @@ $$
 | SCAN | 预设半宽的单维扫描曲面，验证集 SR 选点 |
 | GRID-NH | 去掉 hindsight |
 | GRID-FW | 固定半宽分支（$h=0.1$），检验自适应选档的增量价值 |
+| GRID-NA | 状态不含 LightGBM 前瞻预测（宏观向量末 5 维置零），检验预测特征的增量价值 |
 | GRID | 完整模型 |
 
 基本判据是 GRID 的测试超额收益优于 OPEN，同时比较 inventory_load，防止把单纯降杠杆误判为择时能力。超额收益为正表示同时优于不交易（$h$ 恒取不触发档时超额收益为 0）。
@@ -301,17 +302,19 @@ $$
 \mathrm{CR}=\frac{\mathbb E[r_d]}{\mathrm{MDD}},\qquad\mathrm{SoR}=\frac{\mathbb E[r_d]}{\sqrt{\mathbb E[\min(r_d,0)^2]}}.
 $$
 
-MDD 的峰值序列包含初始净值 1。分母为零时相应指标记 0。
+MDD 的峰值序列包含初始净值 1。分母为零时相应指标记 0。本节指标只用于 RL 的训练、选模与实验汇总；统一回测（8.4）另以格距归一的网格收益汇总各模式。
 
 ### 7.4 诊断指标与行情状态
 
 逐日记录并跨日汇总：
 
 - 决策数、成交数、立即成交数、买卖笔数、闭环率及 $\tau$ 分布；
-- 平均成交手数、平均中心移动 bp、成交量 / 可见流动性中位比；
+- 平均成交手数、平均中心移动 bp、成交量 / 可见流动性中位比、时间加权生效半宽（相对前收，只计网格可触发的区间）；
 - 最大绝对超额仓位、时间加权绝对仓位、inventory_load 与边界停留比例；
 - $h$ 与 $q$ 的时间加权动作分布，决策点平仓次数与手数；
 - 换手率、显性费用、执行成本和日终平仓手数。
+
+成交类指标的口径为日内主动成交：网格触发成交、决策点立即成交与决策点平仓扫单（$h=0$）。日终平仓是回合收尾的被动操作，只单列手数，不进入成交笔数、换手率与闭环率。平均中心移动只对网格成交有定义——平仓不重置中心（3.5）。
 
 其中
 
@@ -319,13 +322,13 @@ $$
 \mathrm{inventory\_load}=\sum_i\frac{\tau_i}{\sum_j\tau_j}\left(\frac{(\operatorname{pos}_i-Q_0)p_i}{B}\right)^2.
 $$
 
-闭环率刻画当日买卖笔数的配对程度：
+闭环率刻画当日买卖笔数的配对程度，$N_b$、$N_s$ 为上述口径的日内买卖笔数：
 
 $$
 \mathrm{closure\_rate}=\frac{2\min(N_b,N_s)}{N_b+N_s}.
 $$
 
-取值 1 表示买卖笔数相等（网格完整往返），0 表示当日只有单边成交或无成交，因而它区分「靠网格往返赚价差」与「靠单边累积敞口赚方向」。
+取值 1 表示买卖笔数相等（敞口在日内完整往返），0 表示当日只有单边成交或无成交，因而它区分「靠往返赚价差」与「靠单边累积敞口赚方向」。主动平仓是策略自己选择的回程腿，计入配对；日终平仓由回合收尾强制发生，计入会把「持到收盘的单边敞口」误报为闭环。
 
 平均中心移动只描述网格中心的移动幅度，不等同于配对后的已实现利润。
 
@@ -341,13 +344,13 @@ RL 作业逐个对应一个 wandb run，run 名与结果文件同名，按标的
 
 奖励与 Q 损失都按相邻验证点之间的样本取均值。
 
-结果写入 `control/runs/<symbol>/<method>[_w<权重>][_lam<λ>][_seed<k>].json`；RL 作业同时把选模后的最佳网络权重与 Config 存为同名 `.pt` 检查点，供 webviz 回放决策过程（9）。汇总表写入 `control/runs/summary.csv`。Config.wandb_mode 取 "online" / "offline" / "disabled"，后者关闭全部记录。
+结果写入 `control/runs/<symbol>/<method>[_w<权重>][_lam<λ>][_seed<k>].json`；RL 作业同时把选模后的最佳网络权重、Config 与消融的固定档位存为同名 `.pt` 检查点，供统一回测与 webviz 以同一贪心口径回放（8.4、9）。汇总表写入 `control/runs/summary.csv`。Config.wandb_mode 取 "online" / "offline" / "disabled"，后者关闭全部记录。
 
 ## 8. 预测算法：门控网格
 
 ### 8.1 决策机制
 
-预测算法不在盘中择时下单。LightGBM 逐 tick 给出 5 个前瞻目标的预测，`forecast/signals.py` 把预测翻译成逐 tick 布尔门控信号，`strategy/engine.py` 执行固定半宽 $0.1\times\mathrm{ATR}$ 的对称网格，并只在净持仓为 0 时读取当拍信号——命中即不开新网，已持仓期间继续执行当前网格直至敞口归零。
+预测算法不在盘中择时下单。LightGBM 逐 tick 给出 5 个前瞻目标的预测，`forecast/signals.py` 把预测翻译成逐 tick 布尔门控信号，`strategy/engine.py` 执行固定半宽 $0.1\times\mathrm{ATR}_3$ 的对称网格，并只在净持仓为 0 时读取当拍信号——命中即不开新网，已持仓期间继续执行当前网格直至敞口归零。
 
 与强化学习的分工差异：
 
@@ -356,7 +359,7 @@ RL 作业逐个对应一个 wandb run，run 名与结果文件同名，按标的
 | 决策内容 | 网格启停（二值门控） | 半宽 $h$ 与数量 $q$ 的档位 |
 | 决策依据 | LightGBM 前瞻预测 | 智能体 Q 值（状态含预测特征） |
 | 决策时点 | 空仓期间每 20 tick 复判一次，敞口归零即刻重判 | 成交/超时/日终触发的 SMDP 决策点 |
-| 网格几何 | 固定 $0.1\times\mathrm{ATR}$ | 动作空间 7 档（5.1） |
+| 网格几何 | 固定 $0.1\times\mathrm{ATR}_3$ | 动作空间 7 档（5.1） |
 | 持仓处理 | 不强制平仓，日终记录敞口 | $h=0$ 主动扫单平回底仓，日终只平超额敞口 |
 
 ### 8.2 训练与预测缓存
@@ -374,18 +377,28 @@ RL 作业逐个对应一个 wandb run，run 名与结果文件同名，按标的
 
 训练按 20 tick 抽样只是为避免重复样本；使用时任一 tick 都能判定，两者的输入口径一致。
 
-三种取数方案：`none`（常开基线）、`oracle`（用缓存的目标真值，门控上限参照）、`prediction`（用 LightGBM 预测，可落地方案）。
+三种取数方案：`none`（不判门控，即 8.4 的常开模式）、`oracle`（用缓存的目标真值，门控上限参照）、`prediction`（用 LightGBM 预测，可落地方案）。
 
-### 8.4 回测
+### 8.4 统一回测
 
-`python -m forecast.backtest`：对测试段内有预测的 (标的, 日)，从 $t_0$（回看长度或当日首个预测生效行的次一 tick，取较晚者）起回放 baseline 与各 门控 $\times$ 方案 组合；成交由 `strategy/engine.py` 给出，费用后净利润由 `strategy/backtest.py` 按统一费率叠加，逐日形态指标与汇总用 `strategy/metrics.py`（Score、满轮日占比、grid_profit 等）。结果与热力图写入 `forecast/runs/backtest/`。
+`python -m strategy.backtest`：在 7:1:2 切分的测试段上对比四种模式——常开（`open`）、残差趋势门控的真值（`oracle`）与预测（`prediction`）、以及 RL 智能体（`agent`）。前三种对测试段内有预测的 (标的, 日)，从可预测起点 $t_0$（回看窗满，缺省为回看长度；预测缺失的 tick 门控不判定、视同放行）起由 `strategy/engine.py` 回放固定半宽 $W_D$ 网格（3.1 的 $\bar h$ 取 $h=0.1$，每笔成交 1 手）；`agent` 模式从 `control/runs/` 的检查点重建智能体，在测试日上贪心回放 RL 环境（与 7.1 的测试评估同一路径），检查点缺失时跳过该模式。
+
+主指标为按当日基准格距 $W_D$ 归一的费用后网格收益（3.4 评分的费用后版本，推导见 [grid_profit.md](grid_profit.md)）：
+
+$$
+g=\frac{\text{费用后净利润}}{W_D},
+$$
+
+费用按 `strategy/costs.py` 的统一费率叠加。引擎三模式的 $W_D$ 即当日格距，$g$ 与 3.4 的 $\operatorname{grid\_profit}$ 恰差费用项；`agent` 的分子为相对 $Q_0$ 底仓的超额净利（6.1 的分子），以同一 $W_D$ 归一后解释为「折合基准格数」。$W_D\propto\operatorname{ATR}_3$，$g$ 因而按当日波动归一，跨日、跨标的可直接平均。
+
+汇总口径（`strategy/metrics.py`）：$g$ 的日均与离散度，加日均闭环率（7.4）、日均成交次数与日均网格宽幅——生效半宽的时间加权均值除以当日前收，只计网格可触发的区间。汇总表的「全体」行为各标的指标的等权均值。结果与热力图写入 `strategy/runs/`。
 
 ## 9. 可视化
 
 `webviz/` 是免构建的浏览器查看器，展示两个算法的实时决策过程：
 
-- `python -m webviz.export --algorithm forecast --symbols ...`：逐日价格曲线、滑动窗口统计与各 门控 $\times$ 方案 的网格回放事件；
-- `python -m webviz.export --algorithm control --symbols ...`：从 `control/runs/` 的检查点重建智能体，在测试日上贪心回放，导出决策点（生效半宽与上下轨）、成交与平仓事件。
+- `python -m webviz.export --algorithm forecast`：逐日价格曲线、滑动窗口统计与各 门控 $\times$ 方案 的网格回放事件；
+- `python -m webviz.export --algorithm control`：从 `control/runs/` 的检查点重建智能体，在测试日上贪心回放，导出决策点（生效半宽与上下轨）、成交与平仓事件。
 
 导出写入 `webviz/data/`（已 gitignore），`python -m http.server 8000` 后访问 `/webviz/`。数据语义见 `webviz/README.md`。
 
@@ -395,17 +408,16 @@ RL 作业逐个对应一个 wandb run，run 名与结果文件同名，按标的
 |---|---|
 | `data/` | 原始 tick parquet 与特征定义（features.md） |
 | `cache/` | 统一缓存（`<symbol>.npz`：逐 tick 的窗口特征、前瞻目标与预测结果，两个算法共用） |
-| `data_provider/` | ticks.py：连续竞价加载与 ATR；split.py：7:1:2 切分；windows.py：统一缓存（窗口特征、目标与预测块） |
-| `strategy/` | costs.py：费率；grid.py：网格几何与穿价；width.py：ATR 半宽；engine.py：报价驱动回放；metrics.py：财务与网格指标；backtest.py：成本叠加 |
-| `forecast/` | config.py / model.py（LightGBM）/ train.py / signals.py（门控）/ backtest.py / figures.py；产物在 `forecast/runs/` |
-| `control/` | config.py / features.py（状态特征与标准化）/ env.py（SMDP、账户、奖励）/ model.py（BDQ）/ agent.py / buffer.py / train.py / baselines.py / tracking.py（wandb）/ trace.py（决策轨迹）；产物在 `control/runs/` |
+| `data_provider/` | ticks.py：连续竞价加载与 ATR；split.py：7:1:2 切分；windows.py：统一缓存（窗口特征、目标与预测块）；cache.py：缓存预建入口（跨标的并行） |
+| `strategy/` | costs.py：费率与成本叠加；grid.py：网格几何与穿价；width.py：ATR 半宽；engine.py：报价驱动回放；metrics.py：财务指标与逐日汇总；backtest.py：统一回测入口（常开 / 门控 / RL）；figures.py：回测热力图；产物在 `strategy/runs/` |
+| `forecast/` | config.py / model.py（LightGBM）/ train.py / signals.py（门控）；产物在 `forecast/runs/` |
+| `control/` | config.py / features.py（状态特征与标准化）/ env.py（SMDP、账户、奖励）/ model.py（BDQ）/ agent.py / buffer.py / train.py（训练循环 + RL 实验矩阵入口）/ baselines.py / tracking.py（wandb）/ trace.py（决策轨迹）/ sweep.py（超参探索）/ summarize.py（结果汇总）/ smoke_test.py（冒烟测试）；产物在 `control/runs/` |
 | `webviz/` | 决策过程查看器（export.py + index.html） |
 | `utils/` | 图形样式与绘图 |
-| `scripts/` | run_all.py（RL 实验矩阵）、summarize.py（汇总）、smoke_test.py（冒烟） |
 | `tests/` | 单元测试 |
 | `docs/` | 设计文档与网格收益推导 |
 
-依赖方向单向：`strategy`（叶子）$\leftarrow$ `data_provider` $\leftarrow$ `forecast` / `control` $\leftarrow$ `webviz`；`data_provider` 依赖 `strategy` 是因为窗口标签含网格回放口径（5.3）。
+依赖方向单向：`strategy` 基元（costs / grid / width / engine / metrics，叶子）$\leftarrow$ `data_provider` $\leftarrow$ `forecast` / `control` $\leftarrow$ `strategy/backtest.py`（回测入口）/ `webviz`；`data_provider` 依赖 `strategy` 基元是因为窗口标签含网格回放口径（5.3）。
 
 ## 11. 已知边界
 

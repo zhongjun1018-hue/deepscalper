@@ -10,7 +10,7 @@ from forecast.model import DEFAULT_MODEL_KWARGS
 class Config:
     data_dir: str = "data"
     cache_dir: str = "cache"
-    runs_dir: str = "forecast/runs"   # 产物：model/ metrics.json figures/ backtest/
+    runs_dir: str = "forecast/runs"   # 产物：model/ metrics.json figures/
     symbols: tuple = ()
     window: WindowSpec = field(default_factory=WindowSpec)
     # 决策间隔：门控每 stride_ticks 个 tick 重判一次，训练行也按此抽样

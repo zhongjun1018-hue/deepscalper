@@ -1,7 +1,8 @@
-"""策略评估指标：财务指标（TR/SR/CR/SoR）与网格形态指标（Score、成交笔数、每笔利润）。
+"""策略评估指标：财务指标（TR/SR/CR/SoR，RL 实验用）与统一回测的逐日汇总。
 
-财务指标以逐日超额净值序列为基础（日频不年化）；网格形态指标以 engine.run_day
-的逐日回放结果为基础，字段名与特征/回测两侧的消费方保持一致。
+财务指标以逐日超额收益序列为基础（日频不年化，design 7.3）；summarize 把统一回测的
+逐日记录汇总为以去量纲网格收益 g 为主的同一套指标（docs/grid_profit.md §七 的
+费用后口径，design 8.4），各模式可直接对比。
 """
 
 from __future__ import annotations
@@ -37,56 +38,36 @@ def closure_rate(n_buys: int, n_sells: int) -> float:
     return 2.0 * min(n_buys, n_sells) / total if total else 0.0
 
 
-def day_frame(records: list[dict]) -> dict[str, np.ndarray]:
-    """逐日网格指标表：buys / sells / grid_profit / grid_profit_lower 及派生列。"""
-    keys = ["buys", "sells", "grid_profit", "grid_profit_lower"]
-    fields = {key: np.array([r[key] for r in records]) for key in keys}
-    fields["trades"] = fields["buys"] + fields["sells"]
-    fields["rounds"] = np.minimum(fields["buys"], fields["sells"])
-    fields["exposure"] = fields["buys"] - fields["sells"]
-    return fields
-
-
-def _moments(values, weights=None):
-    if len(values) == 0:
+def _nan_moments(values: np.ndarray) -> tuple[float, float]:
+    """有值日的均值与总体标准差；全 NaN 记 (NaN, NaN)。"""
+    if not np.isfinite(values).any():
         return float("nan"), float("nan")
-    if weights is None:
-        return float(values.mean()), float(values.std(ddof=0))
-    mean = np.average(values, weights=weights)
-    variance = np.average((values - mean) ** 2, weights=weights)
-    return float(mean), float(np.sqrt(variance))
+    return float(np.nanmean(values)), float(np.nanstd(values))
 
 
-def summarize(days: dict[str, np.ndarray]) -> dict[str, float]:
-    """形态汇总：Score = 2·min(Nb, Ns)/N 仅在成交日取矩，笔数类统计覆盖全部交易日。"""
-    trades = days["trades"]
-    rounds = days["rounds"]
-    filled = trades > 0
-    # 失衡度 |N_b − N_s| / N_d 是该 Score 的补，故只报告其一
-    score = 2 * rounds[filled] / trades[filled]
-    weighted = _moments(score, trades[filled])
-    equal = _moments(score)
-    closed = days["exposure"][filled] == 0
-    grid_profit = days["grid_profit"]
-    grid_profit_lower = days["grid_profit_lower"]
-    profit_per_trade = grid_profit[filled] / trades[filled]
+def summarize(days: list[dict]) -> dict[str, float]:
+    """逐日记录的统一汇总：费用后网格收益 g + 日均闭环率 / 成交次数 / 宽幅。
+
+    days 元素为 {g, n_buys, n_sells, closure_rate, width_rel}。g 以当日基准
+    格距 W_d 归一（design 8.4）；width_rel 为当日时间加权生效半宽 / 前收，
+    无网格触发时间的日记 NaN。NaN 字段的矩均按有值日计。
+    """
+    if not days:
+        return {"n_days": 0, "mean_g": float("nan"), "std_g": float("nan"),
+                "mean_closure_rate": float("nan"), "mean_trades": float("nan"),
+                "mean_buys": float("nan"), "mean_sells": float("nan"),
+                "mean_width_rel": float("nan")}
+    buys = np.array([d["n_buys"] for d in days], dtype=np.float64)
+    sells = np.array([d["n_sells"] for d in days], dtype=np.float64)
+    mean_g, std_g = _nan_moments(np.array([d["g"] for d in days], dtype=np.float64))
     return {
-        "weighted_score_mean": weighted[0],
-        "weighted_score_std": weighted[1],
-        "equal_score_mean": equal[0],
-        "equal_score_std": equal[1],
-        "n_days": int(len(trades)),
-        "n_scored": int(filled.sum()),
-        "closed_day_share": float(closed.mean()) if len(closed) else float("nan"),
-        "mean_rounds": float(rounds.mean()) if len(trades) else float("nan"),
-        "mean_buys": float(days["buys"].mean()) if len(trades) else float("nan"),
-        "mean_sells": float(days["sells"].mean()) if len(trades) else float("nan"),
-        "mean_grid_profit": float(grid_profit.mean()) if len(trades) else float("nan"),
-        "std_grid_profit": float(grid_profit.std(ddof=0)) if len(trades) else float("nan"),
-        "mean_grid_profit_lower": float(grid_profit_lower.mean()) if len(trades) else float("nan"),
-        "std_grid_profit_lower": float(grid_profit_lower.std(ddof=0)) if len(trades) else float("nan"),
-        "mean_profit_per_trade": (float(profit_per_trade.mean())
-                                  if len(profit_per_trade) else float("nan")),
-        "std_profit_per_trade": (float(profit_per_trade.std(ddof=0))
-                                 if len(profit_per_trade) else float("nan")),
+        "n_days": len(days),
+        "mean_g": mean_g,
+        "std_g": std_g,
+        "mean_closure_rate": float(np.mean([d["closure_rate"] for d in days])),
+        "mean_trades": float((buys + sells).mean()),
+        "mean_buys": float(buys.mean()),
+        "mean_sells": float(sells.mean()),
+        "mean_width_rel": _nan_moments(
+            np.array([d["width_rel"] for d in days], dtype=np.float64))[0],
     }

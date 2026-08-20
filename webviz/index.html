@@ -133,7 +133,6 @@
   .key.sell { background: var(--series-sell); }
   .key.flatten { width: 8px; height: 8px; border-radius: 1px; background: var(--gate-edge);
                  transform: rotate(45deg); }
-  .key.predictable { height: 0; border-top: 2px dashed var(--text-2); background: none; }
   .key.select { height: 11px; border-radius: 2px; background: var(--select-wash); border: 1px solid var(--select-edge); }
 
   .chart-wrap { padding: 6px 6px 0; }
@@ -268,7 +267,6 @@
               <span><i class="key buy"></i>买入</span>
               <span><i class="key sell"></i>卖出</span>
               <span class="control-only"><i class="key flatten"></i>平仓</span>
-              <span class="forecast-only"><i class="key predictable"></i>可预测起点</span>
               <span class="forecast-only"><i class="key select"></i>选中窗口</span>
             </div>
             <div class="grid-tools">
@@ -324,11 +322,11 @@ const SVG_NS = 'http://www.w3.org/2000/svg';
 const MINUTES_PER_DAY = 237;
 const CHART = { height: 430, top: 34, right: 20, bottom: 34, left: 62 };
 const X_TICKS = [[0, '09:30'], [30, '10:00'], [60, '10:30'], [90, '11:00'],
-                 [120, '11:30 / 13:00'], [150, '13:30'], [180, '14:00'], [210, '14:30'],
-                 [240, '15:00']];
+                 [120, '11:30 / 13:00'], [150, '13:30'], [180, '14:00'], [210, '14:30']];
 const ALGORITHM_NAMES = { forecast: '预测门控网格', control: '强化学习' };
 const GATE_NAMES = { residual: '残差趋势' };
 const RL_BAND_CAP = 0.05;  // 生效半宽超过中心价 5% 视为关闭档，不绘制也不参与取景
+const FILL_KIND = { immediate: '立即成交', flatten: '决策点平仓', liquidate: '日终清仓' };
 
 const featureMetric = (key, name, unit, scale, digits) => ({
   key, name, unit, scale, digits, read: item => item.features?.[key],
@@ -349,7 +347,7 @@ const METRICS = [
 ];
 
 const state = { index: null, day: null, algorithm: 'forecast', selected: 0,
-                span: MINUTES_PER_DAY, gate: 'residual', strategy: 'none', gridStep: 0,
+                gate: 'residual', strategy: 'none', gridStep: 0,
                 gridPlaying: false, gridTimer: null };
 const el = id => document.getElementById(id);
 const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
@@ -364,10 +362,8 @@ function node(name, attrs, parent) {
 }
 
 function clockAt(minute) {
-  const labels = state.index.minute_labels;
-  if (minute < labels.length) return labels[minute].slice(0, 2) + ':' + labels[minute].slice(2);
-  const total = 14 * 60 + 57 + (minute - MINUTES_PER_DAY);
-  return String(Math.floor(total / 60)).padStart(2, '0') + ':' + String(total % 60).padStart(2, '0');
+  const label = state.index.minute_labels[minute];
+  return label.slice(0, 2) + ':' + label.slice(2);
 }
 
 const formatDate = date => date.slice(0, 4) + '-' + date.slice(4, 6) + '-' + date.slice(6);
@@ -422,7 +418,7 @@ function buildScales(day, width) {
   const plotHeight = CHART.height - CHART.top - CHART.bottom;
   let low = Infinity;
   let high = -Infinity;
-  for (const price of day.price.concat(day.closing_price)) {
+  for (const price of day.price) {
     if (price < low) low = price;
     if (price > high) high = price;
   }
@@ -448,9 +444,9 @@ function buildScales(day, width) {
   high += pad;
   return {
     plotWidth, plotHeight, low, high,
-    x: value => CHART.left + (value / state.span) * plotWidth,
+    x: value => CHART.left + (value / MINUTES_PER_DAY) * plotWidth,
     y: value => CHART.top + (high - value) / (high - low) * plotHeight,
-    invert: pixels => ((pixels - CHART.left) / plotWidth) * state.span,
+    invert: pixels => ((pixels - CHART.left) / plotWidth) * MINUTES_PER_DAY,
   };
 }
 
@@ -465,7 +461,6 @@ function drawAxes(svg, scales) {
     text.textContent = value.toFixed(2);
   }
   for (const [minute, label] of X_TICKS) {
-    if (minute > state.span) continue;
     const text = node('text', { x: scales.x(minute), y: CHART.height - 12, 'text-anchor': 'middle',
                                 fill: 'var(--text-3)', 'font-size': 12 }, layer);
     text.textContent = label;
@@ -531,14 +526,6 @@ function drawPrice(svg, day, scales) {
   const points = day.x.map((x, index) =>
     `${scales.x(x).toFixed(1)},${scales.y(day.price[index]).toFixed(1)}`);
   polyline(points, 'var(--series-price)', 1, layer);
-
-  const tail = day.closing_x.map((x, i) =>
-    `${scales.x(x).toFixed(1)},${scales.y(day.closing_price[i]).toFixed(1)}`);
-  if (tail.length) {
-    const bridge = [`${scales.x(day.x[day.x.length - 1]).toFixed(1)},` +
-                    `${scales.y(day.price[day.price.length - 1]).toFixed(1)}`].concat(tail);
-    polyline(bridge, 'var(--series-price)', 0.45, layer);
-  }
 }
 
 function gridStateEnd(item, nominalEnd, excluded) {
@@ -554,7 +541,7 @@ function drawGridState(svg, day, scales, grid, count) {
   if (!count) return;
   const events = grid.events;
   const shown = events.slice(0, count);
-  const lastX = day.x.length ? day.x[day.x.length - 1] : state.span;
+  const lastX = day.x[day.x.length - 1];
   const visibleEnd = count < events.length ? events[count].x : lastX;
   const layer = node('g', { 'stroke-linecap': 'round' }, svg);
   shown.forEach((item, position) => {
@@ -585,7 +572,7 @@ function drawRlBands(svg, day, scales, count) {
   if (!count) return;
   const decisions = day.decisions;
   const shown = decisions.slice(0, count);
-  const lastX = day.x.length ? day.x[day.x.length - 1] : state.span;
+  const lastX = day.x[day.x.length - 1];
   const visibleEnd = count < decisions.length ? decisions[count].x : lastX;
   const layer = node('g', { 'stroke-linecap': 'round' }, svg);
   shown.forEach((item, position) => {
@@ -631,7 +618,8 @@ function drawRlMarks(svg, day, scales, count) {
                                     fill: fill.side === 'buy' ? 'var(--series-buy)' : 'var(--series-sell)',
                                     stroke: 'var(--card)', 'stroke-width': 1.5 }, layer);
     const title = node('title', {}, circle);
-    title.textContent = `${fill.side === 'buy' ? '买入' : '卖出'} ${fill.qty} 手 @ ${fill.price.toFixed(2)}`;
+    title.textContent = `${fill.side === 'buy' ? '买入' : '卖出'} ${fill.qty} 手 @ ${fill.price.toFixed(2)}`
+                        + (FILL_KIND[fill.kind] ? ` · ${FILL_KIND[fill.kind]}` : '');
   }
 }
 
@@ -687,7 +675,7 @@ function renderRlReplay(day) {
   state.gridStep = clamp(state.gridStep, 0, decisions.length);
   const log = day.log || {};
   el('grid-sub').textContent = `测试集 · 贪心回放 · 决策点 ${log.n_decisions ?? decisions.length} · ` +
-    `成交 ${log.n_fills ?? day.fills.length} 笔 · 决策点平仓 ${log.n_flatten ?? 0} 次`;
+    `日内成交 ${log.n_fills} 笔 · 决策点平仓 ${log.n_flatten} 次`;
   const progress = el('grid-progress');
   progress.max = decisions.length;
   progress.value = state.gridStep;
@@ -730,8 +718,7 @@ function renderComparison(day) {
       ? 100 * grid.gated_minutes / grid.evaluated_minutes : 0;
     const score = grid.score === null ? '—' : grid.score.toFixed(3);
     const gridProfit = Number.isFinite(grid.grid_profit) ? grid.grid_profit.toFixed(2) : '—';
-    const profitLower = Number.isFinite(grid.grid_profit_lower)
-      ? grid.grid_profit_lower.toFixed(2) : '—';
+    const meanWidth = Number.isFinite(grid.width) ? grid.width.toFixed(3) : '—';
     const profitPerTrade = Number.isFinite(grid.profit_per_trade)
       ? grid.profit_per_trade.toFixed(3) : '—';
     return `<button class="strategy-card" type="button" data-strategy="${strategy.key}"
@@ -745,7 +732,7 @@ function renderComparison(day) {
         <span class="strategy-metric"><span>成交</span><b>${grid.trades}</b></span>
         <span class="strategy-metric"><span>日终敞口</span><b>${exposureText(grid.buys - grid.sells)}</b></span>
         <span class="strategy-metric"><span>网格收益</span><b>${gridProfit}</b></span>
-        <span class="strategy-metric"><span>收益下界</span><b>${profitLower}</b></span>
+        <span class="strategy-metric"><span>平均半宽</span><b>${meanWidth}</b></span>
         <span class="strategy-metric"><span>收益 / 交易</span><b>${profitPerTrade}</b></span>
       </span>
       <span class="strategy-foot">买入 ${grid.buys} · 卖出 ${grid.sells} · ` +
@@ -787,7 +774,7 @@ function attachSelection(svg, day, scales) {
 }
 
 function renderStrip(day) {
-  const prices = day.price.concat(day.closing_price);
+  const prices = day.price;
   const last = prices[prices.length - 1];
   const high = Math.max(...prices);
   const low = Math.min(...prices);
@@ -850,14 +837,14 @@ function renderRlStrip(day) {
         <div class="strip-hint">高 ${high.toFixed(2)} · 低 ${low.toFixed(2)} · 收盘位置 ${position.toFixed(0)}%</div>
       </div>
       <div>
-        <div class="strip-label">成交</div>
-        <div class="strip-value">${log.n_fills ?? day.fills.length} 笔</div>
-        <div class="strip-hint">买 ${log.n_buys ?? '—'} · 卖 ${log.n_sells ?? '—'} · 配对率 ${closure}</div>
+        <div class="strip-label">日内成交</div>
+        <div class="strip-value">${log.n_fills} 笔</div>
+        <div class="strip-hint">买 ${log.n_buys} · 卖 ${log.n_sells} · 闭环率 ${closure}</div>
       </div>
       <div>
         <div class="strip-label">决策点</div>
         <div class="strip-value">${log.n_decisions ?? day.decisions.length}</div>
-        <div class="strip-hint">决策点平仓 ${log.n_flatten ?? 0} 次 · 日终扫单 ${log.liquidated_lots ?? 0} 手</div>
+        <div class="strip-hint">决策点平仓 ${log.n_flatten} 次 · 日终清仓 ${log.liquidated_lots} 手</div>
       </div>
     </div>`;
 }
@@ -914,17 +901,6 @@ function renderMetric(row) {
     </div>`;
 }
 
-function drawPredictableStart(svg, day, scales) {
-  if (day.t0 < 0) return;
-  const x = scales.x(day.t0);
-  const line = node('line', { x1: x, x2: x, y1: CHART.top,
-                              y2: CHART.top + scales.plotHeight,
-                              stroke: 'var(--text-2)', 'stroke-width': 1.5,
-                              'stroke-dasharray': '5 4' }, svg);
-  const title = node('title', {}, line);
-  title.textContent = `可预测起点 ${clockAt(day.t0)}`;
-}
-
 function renderChart(day) {
   const wrap = el('chart-wrap');
   wrap.querySelector('svg')?.remove();
@@ -942,7 +918,6 @@ function renderChart(day) {
     if (grid) drawGridState(svg, day, scales, grid, state.gridStep);
     drawWindows(svg, day, scales, { grid: el('show-grid').checked, trend: el('show-trend').checked });
     drawAxes(svg, scales);
-    drawPredictableStart(svg, day, scales);
     drawPrice(svg, day, scales);
     attachSelection(svg, day, scales);
   }
@@ -1036,7 +1011,6 @@ async function select(symbol, date) {
   }
   if (token !== selectionToken) return;
   state.day = day;
-  state.span = MINUTES_PER_DAY + (day.closing_x.length ? state.index.closing_minutes : 0);
   if (state.algorithm === 'control') {
     state.selected = 0;
     state.gridStep = day.decisions.length;

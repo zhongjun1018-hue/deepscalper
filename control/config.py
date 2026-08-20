@@ -20,7 +20,7 @@ class Config:
     # ---- tick 窗口结构（回看与 bar 长度取自 window 规格，避免双份参数）----
     hindsight_ticks: int = 600      # hindsight 视野 H_hs（design 6.2）
     micro_stride: int = 20          # 微观序列抽样间隔：600/20 = 30 步
-    timeout_ticks: int = 100        # K：超时触发间隔
+    timeout_ticks: int = 200        # K：超时触发间隔
 
     # ---- 市场规则（A 股）----
     tick_size: float = 0.01         # 最小变动价位（元）
@@ -39,11 +39,14 @@ class Config:
 
     # ---- 奖励 ----
     # w 与 λ 是偏好参数，此处为缺省档，最终由验证集 SR 在梯子上选优（design 6.2 / 7.1）
-    hindsight_weight: float = 0.1   # w（按 τ/K 加权，见 design 6.2）
+    hindsight_weight: float = 0.2   # w（按 τ/K 加权，见 design 6.2）
     inventory_lambda: float = 3.0   # 存货惩罚 λ（无量纲；梯子 {0, 1, 3, 10, 30}）
 
     # ---- 缓存规格（data_provider.windows 的统一口径；回看、bar、ATR 与半宽下限由此出）----
     window: WindowSpec = field(default_factory=WindowSpec)
+
+    # ---- 状态特征 ----
+    use_predictions: bool = True    # 宏观向量是否含 LightGBM 前瞻预测（GRID-NA 消融置 False）
 
     # ---- 标的标识 ----
     symbols: tuple[str, ...] = ()   # 本次运行的标的集合，决定 symbol_id 与 embedding 规模
@@ -66,7 +69,7 @@ class Config:
     buffer_capacity: int = 100_000
     per_alpha: float = 0.6
     per_beta_start: float = 0.4
-    per_beta_steps: int = 12_000    # β 线性升至 1.0 所需的更新次数（≈ 单次切分的训练规模，design 6.3）
+    per_beta_steps: int = 12_000    # β 线性升至 1.0 所需的更新次数（design 6.3）
     epochs: int = 5
     val_evals_per_epoch: int = 3    # epoch 内均分的验证评估次数（末次落在 epoch 末）
     val_select_window: int = 3      # 选模所用的验证评估点滑动窗口长度（见 design 7.1）

@@ -3,7 +3,7 @@ import os
 import tempfile
 import unittest
 
-from scripts.summarize import (load_rows, select_hyperparams, selected_test_rows,
+from control.summarize import (load_rows, select_hyperparams, selected_test_rows,
                                test_summary)
 
 

@@ -13,9 +13,9 @@ python -m webviz.export --algorithm control --symbols 301308 --method GRID --see
 python -m http.server 8000
 ```
 
-在项目根目录执行命令后，访问 <http://localhost:8000/webviz/>。页面不能直接用 `file://` 打开。
+在项目根目录执行命令后，访问 <http://localhost:8000/webviz/>。页面不能直接用 `file://` 打开。`--symbols` 缺省为 `data/` 下全部标的。
 
-control 侧 `--checkpoint` 缺省时按 `control/runs/<symbol>/` 的结果命名规则解析：先拼 `<method>_w<w>_lam<λ>_seed<s>.pt`（$w$/$\lambda$ 缺省取 `control.config.Config` 默认值），未命中时退到 `<method>_*_seed<s>.pt` 的唯一匹配（run_all 的命名规则是不适用的超参不在文件名中，如 GRID-NH 无 w 标签）；多重匹配或文件不存在会给出明确错误提示——先运行 `scripts/run_all.py` 完成训练，或用 `--checkpoint PATH` 显式指定。
+control 侧 `--checkpoint` 缺省时按 `control/runs/<symbol>/` 的结果命名规则解析：先拼 `<method>_w<w>_lam<λ>_seed<s>.pt`（$w$/$\lambda$ 缺省取 `control.config.Config` 默认值），未命中时退到 `<method>_*_seed<s>.pt` 的唯一匹配（control.train 的命名规则是不适用的超参不在文件名中，如 GRID-NH 无 w 标签）；多重匹配或文件不存在会给出明确错误提示——先运行 `python -m control.train` 完成训练，或用 `--checkpoint PATH` 显式指定。
 
 两个算法可以分别导出，`index.json` 合并记录各自可用的 (symbol, date)，页面右上角切换算法。生成的 `webviz/data/` 已被 `.gitignore` 忽略。
 
@@ -30,10 +30,10 @@ control 侧 `--checkpoint` 缺省时按 `control/runs/<symbol>/` 的结果命名
 | 窗口统计 | 前瞻窗口对数中间价路径的实测统计（`data_provider.windows.path_stats`）；波动、路径、极差、残差和趋势位移换算为 bp，效率比和方向反转率显示为百分比 |
 | 预测值 | 统一缓存 `cache/<symbol>.npz`（`data_provider.windows.load_cache`）的 `preds` 中 `abs_slope` 一列：行索引即 tick 索引，tick $t$ 的预测覆盖 $(t,t+H]$，与该 tick 之后的前瞻路径对齐 |
 | 网格半宽 | 统一缓存的逐日固定半宽 $W$（`strategy.width.grid_width`，$0.1\times\operatorname{ATR}_3$） |
-| 网格回放 | `strategy.engine.run_day(trace=True)`：测试段（7:1:2 切分的样本外）有预测的交易日，自 $t_0$（回看长度与首个可预测 tick 的较晚者）起回放；对手方一档严格越界成交，成交价为触发边界 |
+| 网格回放 | `strategy.engine.run_day(trace=True)`：测试段（7:1:2 切分的样本外）有预测的交易日，统一自可预测起点 $t_0$（回看窗满，即回看长度 600 tick）起回放；对手方一档严格越界成交，成交价为触发边界 |
 | 门控 | `forecast.signals.build_gate_masks`：逐 tick 的布尔信号；引擎只在净持仓为 0 时读取当拍信号，空仓期间每 20 tick 复判一次，敞口归零即刻重判 |
 | 门控对比 | 全天开启（none）/ 预测值过滤（prediction）/ 真实值过滤（oracle，仅事后参照）的残差趋势门控对比 |
-| Score / 网格收益 | `strategy.metrics` 口径：$\mathrm{Score}=2\min(N_b,N_s)/N$；去量纲单日收益、收益下界及收益/交易次数 |
+| Score / 网格收益 | `strategy.metrics` 口径：$\mathrm{Score}=2\min(N_b,N_s)/N$；去量纲单日收益、收益/交易次数及当日平均网格半宽 |
 
 ### control（`data/control/<symbol>/<date>.json`）
 
@@ -43,9 +43,9 @@ control 侧 `--checkpoint` 缺省时按 `control/runs/<symbol>/` 的结果命名
 | 市场构建 | `control.train.build_markets`（窗口特征 + LightGBM 预测，缺块补零）；标准化统计量仅在训练段拟合（`control.features.fit_feature_stats`） |
 | 决策回放 | `control.trace.load_checkpoint` 重建网络与 Config，`control.trace.trace_day` 贪心回放测试段交易日 |
 | 决策点 | `decisions`：成交 / 超时 / 日终触发；`width` 为生效半宽档（$\times\operatorname{ATR}_3$，0 表示平仓回底仓、100 为关闭档），`center/upper/lower` 为生效网格中心与上下轨（平仓档为 null） |
-| 成交标记 | `fills`：网格成交（含决策点立即成交）与平仓 / 日终扫单补记，`side` $\in\{\texttt{buy},\texttt{sell}\}$，`qty` 以手计 |
-| 平仓事件 | 决策点平仓（`width` 为 0）在图上以菱形标记；日终平回底仓计入 `fills` |
-| 单日摘要 | `log` 为 `TradingEnv.episode_log`：成交笔数、配对率、决策点数、平仓次数、换手与费用等 |
+| 成交标记 | `fills`：`TradingEnv` 的全部成交，`kind` $\in\{\texttt{grid},\texttt{immediate},\texttt{flatten},\texttt{liquidate}\}$（区间末触发 / 决策点立即成交 / 决策点平仓 / 日终清仓，后两者为逐档扫单均价），`side` $\in\{\texttt{buy},\texttt{sell}\}$，`qty` 以手计 |
+| 平仓事件 | 决策点平仓（`width` 为 0）在图上以菱形标记；扫单成交与网格成交同样以圆点标记，`kind` 在悬浮提示中区分 |
+| 单日摘要 | `log` 为 `TradingEnv.episode_log`：日内成交笔数、闭环率、决策点数、平仓次数、换手与费用等；成交口径不含日终清仓（design 7.4） |
 
 ### index.json
 
@@ -56,7 +56,6 @@ control 侧 `--checkpoint` 缺省时按 `control/runs/<symbol>/` 的结果命名
     "control": {"symbols": [{"symbol", "name", "dates", "replay_dates", "checkpoint"}]}
   },
   "minute_labels": ["0930", ..., "1456"],
-  "closing_minutes": 0,
   "params": {"model", "lookback_ticks", "pred_ticks", "stride_ticks",
              "atr_mult", "atr_window", "min_width_ratio", "gate_rules"}
 }
