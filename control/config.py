@@ -39,8 +39,8 @@ class Config:
 
     # ---- 奖励 ----
     # w 与 λ 是偏好参数，此处为缺省档，最终由验证集 SR 在梯子上选优（design 6.2 / 7.1）
-    hindsight_weight: float = 0.2   # w（hindsight 视野 = window.pred_min，见 design 6.2）
-    inventory_lambda: float = 3.0   # 存货惩罚 λ（无量纲；梯子 {0, 1, 3, 10, 30}）
+    hindsight_weight: float = 0.02  # w（hindsight 视野 = window.pred_min，见 design 6.2）
+    inventory_lambda: float = 1.0   # 存货惩罚 λ（无量纲；梯子 {0, 1, 3, 10, 30}）
 
     # ---- 缓存规格（data_provider.windows 的统一口径；回看、bar、ATR 与半宽下限由此出）----
     window: WindowSpec = field(default_factory=WindowSpec)
@@ -52,23 +52,23 @@ class Config:
     symbols: tuple[str, ...] = ()   # 本次运行的标的集合，决定 symbol_id 与 embedding 规模
     symbol_embed_dim: int = 8
 
-    # ---- 网络结构 ----
-    hidden_size: int = 64
-    macro_hidden: int = 64
-    trunk_hidden: int = 128
+    # ---- 网络结构（2026-08 一次一因子 sweep 按验证 SR 选定，见 control/runs/sweep/summary.csv）----
+    hidden_size: int = 32
+    macro_hidden: int = 128
+    trunk_hidden: int = 256
 
     # ---- 训练（池化日程：每 epoch 约 22 标的 × 80 日 × 24 决策 ≈ 4.4 万条转移、
     # 约 0.7 万次更新；日程与该规模绑定，经验证曲线微调）----
     normalize: bool = True          # 逐标的基于训练段的 z-score 特征标准化
     norm_clip: float = 10.0         # 标准化后的截断阈值
-    gamma: float = 0.99             # 每分钟折扣；TD 折扣恒为 gamma^decision_interval_min
-    lr: float = 1e-4
+    gamma: float = 0.995            # 每分钟折扣；TD 折扣恒为 gamma^decision_interval_min
+    lr: float = 3e-4
     grad_clip: float = 10.0
-    batch_size: int = 64
+    batch_size: int = 128
     update_every: int = 6           # 每多少个决策步更新一次网络
-    target_sync: int = 2000         # 目标网络同步间隔（更新次数）
+    target_sync: int = 1000         # 目标网络同步间隔（更新次数）
     buffer_capacity: int = 300_000
-    per_alpha: float = 0.6
+    per_alpha: float = 0.8
     per_beta_start: float = 0.4
     per_beta_steps: int = 60_000    # β 线性升至 1.0 所需的更新次数（design 6.3）
     epochs: int = 3
