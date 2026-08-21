@@ -20,6 +20,7 @@ forecast/        预测算法：前瞻回归（RL 状态特征，产物在 forec
                  （模式定义 / 识别 / 经济验证，产物在 forecast/regime/runs/）
 control/         强化学习算法：环境、分支 Q 网络、智能体、训练、超参探索、结果汇总与冒烟测试；产物在 control/runs/
 webviz/          决策过程查看器（导出 + 单页前端）
+attribution/     门控归因：门控点重放与反事实对照、人工撰写的趋势 / 震荡解释、免框架展示页 index.html；产物在 attribution/runs/
 utils/           图形样式与绘图
 tests/           单元测试
 docs/            设计文档与网格收益推导
@@ -106,6 +107,10 @@ uv sync                # torch(CUDA 12.8) / numpy / pandas / lightgbm / scikit-l
 
 # 浏览器查看
 .venv/bin/python -m http.server 8000   # 访问 http://localhost:8000/webviz/
+
+# 门控归因：对引擎每个实际停网段，解释为何停网、避开了什么、常开在同一段接到了什么（写法见 attribution/README.md）
+.venv/bin/python -m attribution.export --symbol 301308 --dates 20260717 20260701
+python -m http.server 8000   # 访问 http://localhost:8000/attribution/
 ```
 
 ## 产物
@@ -113,6 +118,7 @@ uv sync                # torch(CUDA 12.8) / numpy / pandas / lightgbm / scikit-l
 - `forecast/runs/`：前瞻回归模型（`model/`）与预测评估（`metrics.json`、可选 `figures/`）。
 - `forecast/regime/runs/`：识别器（`model/`）、`meta.json`（含门控阈值 τ）、识别评估 `metrics.json` 与经济验证 `economics.json`。
 - `strategy/runs/`：统一回测（`summary.json` 与各指标热力图 SVG：费用后网格收益 $g$、日均闭环率与成交次数、网格宽幅与门控占比）。
+- `attribution/runs/`：门控点解释 `<symbol>_<date>_p<k>.md`（人工撰写），页面数据 `<symbol>_<date>.json` 与 `index.json`（展示页读取）。
 - `control/runs/`：`<method>[_w<权重>][_lam<λ>][_seed<k>].json` 统一训练结果（测试指标逐标的报告 + 全体等权行）与同名 `.pt` 检查点（选模后的最佳权重与逐标的标准化统计量，供统一回测与 webviz 回放），`summary.csv` 汇总表；`sweep/` 为超参探索的逐作业结果与 `sweep/summary.csv` 梯子对比表。
 - 每个 RL 作业同时建一个 wandb run（项目 `gridscalper`）：逐验证点记录训练奖励、Q 损失与验证 TR、SR 及选模判据曲线；训练结束记录测试集指标与逐日表（design 7.5）。
 

@@ -26,6 +26,7 @@ strategy/runs/
 forecast/runs/
 forecast/regime/runs/
 control/runs/
+attribution/runs/
 webviz/data/
 
 # IDE / 系统文件

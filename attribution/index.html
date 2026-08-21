@@ -1,0 +1,567 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>门控归因</title>
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    color-scheme: light;
+    --page: #faf9f5;
+    --card: #ffffff;
+    --card-soft: #f4f2ec;
+    --border: #e6e4dc;
+    --border-strong: #d4d1c6;
+    --text-1: #1f1e1d;
+    --text-2: #5c5b57;
+    --text-3: #8a8880;
+    --band: #f1efe8;
+    --series-price: #2a78d6;
+    --series-grid-dynamic: #8a76c8;
+    --series-grid-center: #8064c7;
+    --series-buy: #c0392b;
+    --series-sell: #1e7a4b;
+    --gate-edge: #b45309;
+    --select-wash: rgba(235, 104, 52, 0.09);
+    --select-edge: rgba(235, 104, 52, 0.55);
+    --shadow: 0 1px 2px rgba(31, 30, 29, 0.04), 0 10px 24px rgba(31, 30, 29, 0.05);
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --page: #1f1e1d;
+    --card: #262624;
+    --card-soft: #2d2c29;
+    --border: #3a3936;
+    --border-strong: #4b4a45;
+    --text-1: #f5f4ef;
+    --text-2: #b5b3a9;
+    --text-3: #85837b;
+    --band: #2d2c29;
+    --series-price: #3987e5;
+    --series-grid-dynamic: #ad9be2;
+    --series-grid-center: #9b83da;
+    --series-buy: #e05b4f;
+    --series-sell: #4aa879;
+    --gate-edge: #d89a3d;
+    --select-wash: rgba(217, 89, 38, 0.16);
+    --select-edge: rgba(217, 89, 38, 0.7);
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 10px 24px rgba(0, 0, 0, 0.28);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 28px clamp(16px, 3vw, 44px) 56px;
+    background: var(--page);
+    color: var(--text-1);
+    font-family: "Times New Roman", Times, "SimSun", "宋体", "Songti SC", "STSong",
+                 "Noto Serif CJK SC", serif;
+    font-size: 15px;
+    line-height: 1.6;
+  }
+  .shell { max-width: 1560px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+
+  .topbar { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; flex-wrap: wrap; }
+  .eyebrow { margin: 0 0 2px; color: var(--text-3); font-size: 13px; letter-spacing: 0.14em; text-transform: uppercase; }
+  h1 { margin: 0; font-size: 27px; font-weight: 700; letter-spacing: -0.01em; }
+  .identity { margin: 4px 0 0; color: var(--text-2); font-size: 14px; }
+  .identity b { color: var(--text-1); font-weight: 700; letter-spacing: 0.04em; }
+
+  .controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  button, select {
+    font: inherit; color: var(--text-1); background: var(--card);
+    border: 1px solid var(--border-strong); border-radius: 9px;
+    height: 38px; padding: 0 12px; cursor: pointer;
+  }
+  select { padding-right: 30px; appearance: none;
+    background-image: linear-gradient(45deg, transparent 50%, var(--text-3) 50%),
+                      linear-gradient(135deg, var(--text-3) 50%, transparent 50%);
+    background-position: right 14px center, right 9px center;
+    background-size: 5px 5px, 5px 5px; background-repeat: no-repeat;
+  }
+  button:hover, select:hover { border-color: var(--text-3); background: var(--card-soft); }
+  button:disabled, select:disabled { opacity: 0.4; cursor: not-allowed; }
+  :focus-visible { outline: 2px solid var(--text-2); outline-offset: 2px; }
+  .divider { width: 1px; height: 24px; background: var(--border); }
+
+  .panel { background: var(--card); border: 1px solid var(--border); border-radius: 14px; box-shadow: var(--shadow); }
+  .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 8px 18px;
+                padding: 14px 18px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  .panel-title { font-size: 17px; font-weight: 700; }
+  .panel-sub { margin-top: 2px; color: var(--text-3); font-size: 13px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 14px; color: var(--text-2); font-size: 13px; line-height: 1.35; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .key { width: 16px; height: 2px; background: var(--series-price); }
+  .key.grid-dynamic { width: 16px; height: 9px; border: 1px solid var(--series-grid-dynamic); border-radius: 2px;
+                      background: var(--series-grid-dynamic); opacity: 0.25; }
+  .key.grid-center { background: var(--series-grid-center); }
+  .key.buy, .key.sell { width: 9px; height: 9px; border-radius: 50%; }
+  .key.buy { background: var(--series-buy); }
+  .key.sell { background: var(--series-sell); }
+  .key.point { width: 8px; height: 8px; border-radius: 1px; background: var(--gate-edge); transform: rotate(45deg); }
+  .key.select { width: 8px; height: 8px; border-radius: 1px; background: var(--gate-edge);
+                outline: 2px solid var(--select-edge); outline-offset: 2px; transform: rotate(45deg); }
+
+  .charts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0; }
+  .chart { min-width: 0; padding: 12px 6px 4px; }
+  .chart + .chart { border-left: 1px solid var(--border); }
+  .chart-title { padding: 0 12px; font-size: 15px; font-weight: 700; }
+  .chart-title small { margin-left: 8px; color: var(--text-2); font-weight: 400; font-size: 13px; }
+  svg { display: block; width: 100%; height: auto; }
+  .chart-foot { display: flex; justify-content: flex-end; gap: 12px; padding: 4px 18px 12px;
+                color: var(--text-3); font-size: 13px; }
+  .hit { cursor: pointer; }
+  kbd { display: inline-block; min-width: 20px; margin: 0 2px; padding: 1px 6px;
+        border: 1px solid var(--border-strong); border-bottom-width: 2px; border-radius: 5px;
+        background: var(--card-soft); color: var(--text-2); font-size: 12px; text-align: center; }
+
+  .detail-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 12px;
+                 padding: 14px 18px; border-bottom: 1px solid var(--border); }
+  .navigator { display: grid; grid-template-columns: 38px auto 38px; gap: 8px; align-items: center; }
+  .navigator span { color: var(--text-2); font-size: 13px; text-align: center; min-width: 48px; }
+  .detail-body { display: grid; grid-template-columns: 360px minmax(0, 1fr); gap: 0; }
+  .compare { padding: 14px 18px; border-right: 1px solid var(--border); }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { padding: 8px 6px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--border); }
+  th { color: var(--text-2); font-weight: 400; }
+  thead th { color: var(--text-1); font-weight: 700; }
+  tr:last-child td, tr:last-child th { border-bottom: 0; }
+  .explain { padding: 6px 22px 14px; }
+  .explain h4 { margin: 14px 0 4px; font-size: 15px; }
+  .explain ul { margin: 0; padding-left: 20px; }
+  .explain li, .explain p { margin: 3px 0; }
+  .grid-empty { padding: 38px 18px; color: var(--text-3); text-align: center; }
+  .detail-body > .grid-empty { grid-column: 1 / -1; }
+
+  .notice { color: var(--text-2); font-size: 14px; }
+  .notice code { background: var(--band); padding: 2px 6px; border-radius: 5px; }
+
+  @media (max-width: 1100px) {
+    .charts { grid-template-columns: 1fr; }
+    .chart + .chart { border-left: 0; border-top: 1px solid var(--border); }
+    .detail-body { grid-template-columns: 1fr; }
+    .compare { border-right: 0; border-bottom: 1px solid var(--border); }
+  }
+</style>
+</head>
+<body>
+<div class="shell">
+  <div class="topbar">
+    <div>
+      <p class="eyebrow">模式门控 · 停网段对照</p>
+      <h1>门控归因</h1>
+      <p class="identity" id="identity">—</p>
+    </div>
+    <div class="controls">
+      <select id="symbol" aria-label="选择标的"></select>
+      <span class="divider"></span>
+      <button id="prev-day" type="button" aria-label="前一交易日">←</button>
+      <select id="date" aria-label="选择交易日"></select>
+      <button id="next-day" type="button" aria-label="后一交易日">→</button>
+      <span class="divider"></span>
+      <button id="theme" type="button">切换主题</button>
+    </div>
+  </div>
+
+  <div id="workspace" hidden style="display: flex; flex-direction: column; gap: 16px;">
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <div class="panel-title">常开 / 门控网格回放</div>
+          <div class="panel-sub" id="chart-sub"></div>
+        </div>
+        <div class="legend">
+          <span><i class="key"></i>成交价</span>
+          <span><i class="key grid-dynamic"></i>动态网格范围</span>
+          <span><i class="key grid-center"></i>动态网格中心</span>
+          <span><i class="key buy"></i>买入</span>
+          <span><i class="key sell"></i>卖出</span>
+          <span><i class="key point"></i>门控点（停网触发）</span>
+          <span><i class="key select"></i>选中门控点</span>
+        </div>
+      </div>
+      <div class="charts" id="charts"></div>
+      <div class="chart-foot"><span>点击任一图中的门控点查看对照与解释，<kbd>←</kbd><kbd>→</kbd> 切换</span></div>
+    </section>
+
+    <section class="panel" id="detail"></section>
+  </div>
+
+  <p class="notice" id="notice"></p>
+</div>
+
+<script>
+"use strict";
+
+const SVG_NS = 'http://www.w3.org/2000/svg';
+const MINUTES_PER_DAY = 237;
+const CHART = { height: 340, top: 30, right: 16, bottom: 30, left: 58 };
+const X_TICKS = [[0, '09:30'], [60, '10:30'], [120, '11:30 / 13:00'], [180, '14:00']];
+const GRIDS = [{ key: 'none', name: '常开', side: 'always_on' },
+               { key: 'prediction', name: '门控', side: 'gated' }];
+
+const state = { index: null, runs: null, day: null, points: [], explanations: {}, selected: null };
+const el = id => document.getElementById(id);
+const formatDate = date => date.slice(0, 4) + '-' + date.slice(4, 6) + '-' + date.slice(6);
+const signed = (value, digits) => (value >= 0 ? '+' : '−') + Math.abs(value).toFixed(digits);
+const escapeHtml = text => text.replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+
+function clockAt(minute) {
+  const label = state.index.minute_labels[minute];
+  return label.slice(0, 2) + ':' + label.slice(2);
+}
+
+function node(name, attrs, parent) {
+  const created = document.createElementNS(SVG_NS, name);
+  for (const key in attrs) created.setAttribute(key, attrs[key]);
+  if (parent) parent.appendChild(created);
+  return created;
+}
+
+function niceTicks(low, high, count) {
+  const raw = (high - low) / count;
+  const magnitude = Math.pow(10, Math.floor(Math.log10(raw)));
+  const step = [1, 2, 2.5, 5, 10].find(unit => unit * magnitude >= raw) * magnitude;
+  const ticks = [];
+  for (let value = Math.ceil(low / step) * step; value <= high + step * 1e-6; value += step) {
+    ticks.push(value);
+  }
+  return ticks;
+}
+
+async function fetchJson(path) {
+  const response = await fetch(path);
+  if (!response.ok) throw new Error('HTTP ' + response.status);
+  return response.json();
+}
+
+// 两张图共用纵轴：价格与两套网格的上下轨一起取景，便于左右对照
+function buildScales(day, width) {
+  const plotWidth = width - CHART.left - CHART.right;
+  const plotHeight = CHART.height - CHART.top - CHART.bottom;
+  let low = Math.min(...day.price);
+  let high = Math.max(...day.price);
+  for (const grid of GRIDS) {
+    for (const item of day.grids[grid.key].events) {
+      low = Math.min(low, item.lower);
+      high = Math.max(high, item.upper);
+    }
+  }
+  const pad = (high - low || 0.02) * 0.09;
+  low -= pad;
+  high += pad;
+  return {
+    plotWidth, plotHeight, low, high,
+    x: value => CHART.left + (value / MINUTES_PER_DAY) * plotWidth,
+    y: value => CHART.top + (high - value) / (high - low) * plotHeight,
+  };
+}
+
+function drawAxes(svg, scales) {
+  const layer = node('g', {}, svg);
+  for (const value of niceTicks(scales.low, scales.high, 5)) {
+    const y = scales.y(value);
+    node('line', { x1: CHART.left, x2: CHART.left + scales.plotWidth, y1: y, y2: y,
+                   stroke: 'var(--border)', 'stroke-width': 1 }, layer);
+    const text = node('text', { x: CHART.left - 10, y: y + 4, 'text-anchor': 'end',
+                                fill: 'var(--text-3)', 'font-size': 12 }, layer);
+    text.textContent = value.toFixed(2);
+  }
+  for (const [minute, label] of X_TICKS) {
+    const text = node('text', { x: scales.x(minute), y: CHART.height - 12, 'text-anchor': 'middle',
+                                fill: 'var(--text-3)', 'font-size': 12 }, layer);
+    text.textContent = label;
+  }
+  node('line', { x1: scales.x(120), x2: scales.x(120), y1: CHART.top,
+                 y2: CHART.top + scales.plotHeight, stroke: 'var(--border-strong)',
+                 'stroke-width': 1 }, layer);
+}
+
+function drawStartLine(svg, day, scales) {
+  const x = scales.x(day.t0);
+  const layer = node('g', {}, svg);
+  node('line', { x1: x, x2: x, y1: CHART.top, y2: CHART.top + scales.plotHeight,
+                 stroke: 'var(--gate-edge)', 'stroke-width': 1, 'stroke-dasharray': '5 4' }, layer);
+  const label = node('text', { x, y: CHART.top - 8, 'text-anchor': 'middle',
+                               fill: 'var(--gate-edge)', 'font-size': 11.5 }, layer);
+  label.textContent = `预测起点 ${clockAt(day.t0)}`;
+}
+
+function drawPrice(svg, day, scales) {
+  const layer = node('g', { fill: 'none', 'stroke-width': 1.5, 'stroke-linejoin': 'round',
+                            'stroke-linecap': 'round' }, svg);
+  const points = day.x.map((x, index) =>
+    `${scales.x(x).toFixed(1)},${scales.y(day.price[index]).toFixed(1)}`);
+  node('polyline', { points: points.join(' '), stroke: 'var(--series-price)' }, layer);
+}
+
+// 门控侧零敞口事件的网格区域在下一个停网段起点断开（引擎停网只发生在零敞口，重开会有新的 open 事件）
+function gridStateEnd(item, nominalEnd, gated) {
+  if (!gated || item.exposure !== 0) return nominalEnd;
+  const stop = state.points.find(point => point.start > item.minute);
+  return stop ? Math.min(nominalEnd, stop.start) : nominalEnd;
+}
+
+function drawGridBands(svg, day, scales, grid) {
+  const events = day.grids[grid.key].events;
+  const lastX = day.x[day.x.length - 1];
+  const layer = node('g', { 'stroke-linecap': 'round' }, svg);
+  events.forEach((item, position) => {
+    const nominalEnd = position + 1 < events.length ? events[position + 1].x : lastX;
+    const end = gridStateEnd(item, nominalEnd, grid.key === 'prediction');
+    const left = scales.x(item.x);
+    const right = scales.x(Math.max(end, item.x));
+    if (right <= left) return;
+    node('rect', { x: left, y: scales.y(item.upper), width: right - left,
+                   height: Math.max(scales.y(item.lower) - scales.y(item.upper), 1),
+                   fill: 'var(--series-grid-dynamic)', 'fill-opacity': 0.12 }, layer);
+    node('line', { x1: left, x2: right, y1: scales.y(item.center), y2: scales.y(item.center),
+                   stroke: 'var(--series-grid-center)', 'stroke-width': 1.5,
+                   'stroke-dasharray': '4 4' }, layer);
+  });
+}
+
+function drawFills(svg, day, scales, grid) {
+  const layer = node('g', {}, svg);
+  for (const item of day.grids[grid.key].events) {
+    if (!Number.isFinite(item.fill)) continue;
+    const circle = node('circle', { cx: scales.x(item.x), cy: scales.y(item.fill), r: 4.5,
+                                    fill: item.kind === 'buy' ? 'var(--series-buy)' : 'var(--series-sell)',
+                                    stroke: 'var(--card)', 'stroke-width': 1.5 }, layer);
+    const title = node('title', {}, circle);
+    title.textContent = `${clockAt(item.minute)} ${item.kind === 'buy' ? '买入' : '卖出'} ${item.fill.toFixed(2)} · 敞口 ${item.exposure}`;
+  }
+}
+
+// 门控点：每次实际停网的触发时刻，落在价格线上的菱形标记，选中加橙色外圈
+function drawPoints(svg, scales) {
+  const layer = node('g', {}, svg);
+  for (const point of state.points) {
+    const cx = scales.x(point.start);
+    const cy = scales.y(point.price_start);
+    const selected = point.id === state.selected;
+    const group = node('g', { class: 'hit' }, layer);
+    if (selected) {
+      node('circle', { cx, cy, r: 10, fill: 'none', stroke: 'var(--select-edge)', 'stroke-width': 2 }, group);
+    }
+    node('rect', { x: cx - 5, y: cy - 5, width: 10, height: 10, fill: 'var(--gate-edge)',
+                   stroke: 'var(--card)', 'stroke-width': 1.2, transform: `rotate(45 ${cx} ${cy})` }, group);
+    const label = node('text', { x: cx, y: cy - 14, 'text-anchor': 'middle', 'font-size': 11.5, 'font-weight': 700,
+                                 fill: selected ? 'var(--select-edge)' : 'var(--gate-edge)' }, group);
+    label.textContent = `#${point.id}`;
+    node('circle', { cx, cy, r: 14, fill: 'transparent' }, group);
+    const title = node('title', {}, group);
+    title.textContent = `门控点 #${point.id} · ${clockAt(point.start)} 停网，${clockAt(point.end)} 止 · ${point.minutes} 分钟`;
+    group.addEventListener('click', () => selectPoint(point.id));
+  }
+}
+
+function renderCharts(day) {
+  const wrap = el('charts');
+  wrap.innerHTML = '';
+  const width = Math.max(wrap.clientWidth / (matchMedia('(max-width: 1100px)').matches ? 1 : 2), 420);
+  const scales = buildScales(day, width);
+  for (const grid of GRIDS) {
+    const card = day.grids[grid.key];
+    const chart = document.createElement('div');
+    chart.className = 'chart';
+    chart.innerHTML = `<div class="chart-title">${grid.name}<small>网格收益 ${signed(card.grid_profit, 1)}</small></div>`;
+    const svg = node('svg', { viewBox: `0 0 ${width} ${CHART.height}`, width, height: CHART.height,
+                              role: 'img', 'aria-label': `${grid.name}网格回放` });
+    drawGridBands(svg, day, scales, grid);
+    drawAxes(svg, scales);
+    drawStartLine(svg, day, scales);
+    drawPrice(svg, day, scales);
+    drawFills(svg, day, scales, grid);
+    drawPoints(svg, scales);
+    chart.appendChild(svg);
+    wrap.appendChild(chart);
+  }
+}
+
+// 当日两套网格的日度指标（webviz 导出口径）
+const DAY_ROWS = [
+  ['买入', grid => `${grid.buys} 笔`],
+  ['卖出', grid => `${grid.sells} 笔`],
+  ['成交', grid => `${grid.trades} 笔`],
+  ['日终敞口', grid => String(grid.events.length ? grid.events[grid.events.length - 1].exposure : 0)],
+  ['闭环率', grid => grid.score.toFixed(2)],
+  ['网格收益', grid => signed(grid.grid_profit, 2)],
+  ['收益 / 交易次数', grid => grid.trades ? signed(grid.profit_per_trade, 3) : '—'],
+];
+
+function renderExplanation(point) {
+  const text = state.explanations[point.id];
+  if (!text) {
+    return `<p class="notice">尚无解释：按 README「解释写法」撰写 <code>runs/${state.day.symbol}_${state.day.date}_p${point.id}.md</code> 后重新导出</p>`;
+  }
+  const parts = text.split(/^###\s*(.+?)\s*$/m);
+  let html = '';
+  for (let i = 1; i < parts.length - 1; i += 2) {
+    html += `<h4>${escapeHtml(parts[i])}</h4>`;
+    const bullets = [];
+    const paragraphs = [];
+    for (const line of parts[i + 1].split('\n')) {
+      const text = line.trim();
+      if (!text) continue;
+      if (text.startsWith('- ')) bullets.push(`<li>${escapeHtml(text.slice(2))}</li>`);
+      else paragraphs.push(`<p>${escapeHtml(text)}</p>`);
+    }
+    html += paragraphs.join('') + (bullets.length ? `<ul>${bullets.join('')}</ul>` : '');
+  }
+  return html;
+}
+
+function renderDetail() {
+  const points = state.points;
+  const panel = el('detail');
+  if (!points.length) {
+    panel.innerHTML = '<div class="grid-empty">当日引擎没有停网，没有门控点。</div>';
+    return;
+  }
+  const point = points.find(item => item.id === state.selected);
+  const position = points.indexOf(point);
+  panel.innerHTML = `
+    <div class="detail-head">
+      <div>
+        <div class="panel-title">门控点 #${point.id} · ${clockAt(point.start)} 停网 · 至 ${clockAt(point.end)} 共 ${point.minutes} 分钟</div>
+        <div class="panel-sub">段内价格 ${point.price_start.toFixed(2)} → ${point.price_end.toFixed(2)}，位移 ${signed(point.drift_W, 2)} 个半宽；` +
+          `常开在段内 ${point.always_on.buys} 买 ${point.always_on.sells} 卖、敞口 ${point.always_on.exposure_in} → ${point.always_on.exposure_out}、盯市 ${signed(point.always_on.mtm_W, 2)} 个半宽 · 左表为当日指标</div>
+      </div>
+      <div class="navigator">
+        <button id="prev-point" type="button" aria-label="上一个门控点" ${position === 0 ? 'disabled' : ''}>←</button>
+        <span>${position + 1} / ${points.length}</span>
+        <button id="next-point" type="button" aria-label="下一个门控点" ${position === points.length - 1 ? 'disabled' : ''}>→</button>
+      </div>
+    </div>
+    <div class="detail-body">
+      <div class="compare">
+        <table>
+          <thead><tr><th></th><th>门控</th><th>常开</th></tr></thead>
+          <tbody>${DAY_ROWS.map(([name, read]) => `<tr><th>${name}</th><td>${read(state.day.grids.prediction)}</td><td>${read(state.day.grids.none)}</td></tr>`).join('')}</tbody>
+        </table>
+      </div>
+      <div class="explain">${renderExplanation(point)}</div>
+    </div>`;
+  el('prev-point').addEventListener('click', () => selectPoint(points[position - 1].id));
+  el('next-point').addEventListener('click', () => selectPoint(points[position + 1].id));
+}
+
+function selectPoint(id) {
+  state.selected = id;
+  renderCharts(state.day);
+  renderDetail();
+}
+
+function fillDates(symbol) {
+  const picker = el('date');
+  picker.innerHTML = '';
+  for (const date of state.runs[symbol]) {
+    const option = document.createElement('option');
+    option.value = date;
+    option.textContent = formatDate(date);
+    picker.appendChild(option);
+  }
+  return picker.value;
+}
+
+let selectionToken = 0;
+
+async function select(symbol, date) {
+  const token = ++selectionToken;
+  let day, runs;
+  try {
+    [day, runs] = await Promise.all([
+      fetchJson(`../webviz/data/forecast/${symbol}/${date}.json`),
+      fetchJson(`runs/${symbol}_${date}.json`),
+    ]);
+  } catch (error) {
+    if (token === selectionToken) {
+      el('notice').textContent = `未能读取 ${symbol} ${formatDate(date)} 的页面数据（${error.message}）。`;
+    }
+    return;
+  }
+  if (token !== selectionToken) return;
+  state.day = day;
+  state.points = runs.points;
+  state.explanations = runs.explanations;
+  state.selected = state.points[0]?.id ?? null;
+  const entry = state.index.algorithms.forecast.symbols.find(item => item.symbol === symbol);
+  const dates = state.runs[symbol];
+  el('identity').innerHTML = `<b>${symbol}</b> ${entry?.name ?? ''} · ${formatDate(date)} · ` +
+    `第 ${dates.indexOf(date) + 1} / ${dates.length} 个已归因交易日`;
+  el('prev-day').disabled = dates.indexOf(date) === 0;
+  el('next-day').disabled = dates.indexOf(date) === dates.length - 1;
+  el('chart-sub').textContent = `横轴压缩午休；网格半宽 ${day.width.toFixed(4)}，统一从 ${clockAt(day.t0)} 起回放；` +
+    `停网段按引擎状态机重放（零敞口锚点读信号、连续 ${state.index.params.confirm_n} 拍确认）`;
+  document.title = `${symbol} ${entry?.name ?? ''} · 门控归因`;
+  el('workspace').hidden = false;
+  el('notice').textContent = '';
+  renderCharts(day);
+  renderDetail();
+}
+
+function stepDate(offset) {
+  const picker = el('date');
+  const next = picker.selectedIndex + offset;
+  if (next < 0 || next >= picker.options.length) return;
+  picker.selectedIndex = next;
+  select(el('symbol').value, picker.value);
+}
+
+async function main() {
+  document.documentElement.dataset.theme =
+    matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  try {
+    [state.index, state.runs] = await Promise.all([
+      fetchJson('../webviz/data/index.json'), fetchJson('runs/index.json')]);
+  } catch (error) {
+    el('notice').innerHTML =
+      `未能读取页面数据（${error.message}）。请先运行 <code>python -m webviz.export --algorithm forecast --symbols …</code> ` +
+      '与 <code>python -m attribution.export --symbol …</code>，再在项目根目录执行 ' +
+      '<code>python -m http.server 8000</code>，然后访问 <code>http://localhost:8000/attribution/</code>。';
+    return;
+  }
+  const symbols = Object.keys(state.runs);
+  if (!symbols.length) {
+    el('notice').textContent = 'runs/index.json 没有任何已导出的交易日，请先运行 python -m attribution.export。';
+    return;
+  }
+  const picker = el('symbol');
+  for (const symbol of symbols) {
+    const entry = state.index.algorithms.forecast.symbols.find(item => item.symbol === symbol);
+    const option = document.createElement('option');
+    option.value = symbol;
+    option.textContent = `${symbol} ${entry?.name ?? ''}`;
+    picker.appendChild(option);
+  }
+  picker.addEventListener('change', event => select(event.target.value, fillDates(event.target.value)));
+  el('date').addEventListener('change', () => select(picker.value, el('date').value));
+  el('prev-day').addEventListener('click', () => stepDate(-1));
+  el('next-day').addEventListener('click', () => stepDate(1));
+  el('theme').addEventListener('click', () => {
+    const current = document.documentElement.dataset.theme;
+    document.documentElement.dataset.theme = current === 'dark' ? 'light' : 'dark';
+  });
+  addEventListener('keydown', event => {
+    if (event.target instanceof Element && event.target.closest('button, select')) return;
+    const points = state.points;
+    const position = points.findIndex(point => point.id === state.selected);
+    if (event.key === 'ArrowLeft' && position > 0) { event.preventDefault(); selectPoint(points[position - 1].id); }
+    if (event.key === 'ArrowRight' && position >= 0 && position < points.length - 1) {
+      event.preventDefault(); selectPoint(points[position + 1].id);
+    }
+  });
+  let resizeTimer = null;
+  addEventListener('resize', () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => state.day && renderCharts(state.day), 120);
+  });
+  await select(symbols[0], fillDates(symbols[0]));
+}
+
+main();
+</script>
+</body>
+</html>
