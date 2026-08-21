@@ -117,7 +117,7 @@ python -m http.server 8000   # 访问 http://localhost:8000/attribution/
 
 - `forecast/runs/`：前瞻回归模型（`model/`）与预测评估（`metrics.json`、可选 `figures/`）。
 - `forecast/regime/runs/`：识别器（`model/`）、`meta.json`（含门控阈值 τ）、识别评估 `metrics.json` 与经济验证 `economics.json`。
-- `strategy/runs/`：统一回测（`summary.json` 与各指标热力图 SVG：费用后网格收益 $g$、日均闭环率与成交次数、网格宽幅与门控占比）。
+- `strategy/runs/`：统一回测（`summary.json` 与各指标热力图 SVG：费用后网格收益 $g$、日均闭环率与成交次数、日终敞口与满闭环率、网格宽幅与门控占比）。
 - `attribution/runs/`：门控点解释 `<symbol>_<date>_p<k>.md`（人工撰写），页面数据 `<symbol>_<date>.json` 与 `index.json`（展示页读取）。
 - `control/runs/`：`<method>[_w<权重>][_lam<λ>][_seed<k>].json` 统一训练结果（测试指标逐标的报告 + 全体等权行）与同名 `.pt` 检查点（选模后的最佳权重与逐标的标准化统计量，供统一回测与 webviz 回放），`summary.csv` 汇总表；`sweep/` 为超参探索的逐作业结果与 `sweep/summary.csv` 梯子对比表。
 - 每个 RL 作业同时建一个 wandb run（项目 `gridscalper`）：逐验证点记录训练奖励、Q 损失与验证 TR、SR 及选模判据曲线；训练结束记录测试集指标与逐日表（design 7.5）。

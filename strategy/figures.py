@@ -44,6 +44,19 @@ HEATMAPS = [
         "unit": {"zh": "日均次数", "en": "Count per day"},
     },
     {
+        "stem": "abs_exposure",
+        "name": {"zh": "日均日终敞口", "en": "End-of-day Exposure"},
+        "key": "mean_abs_exposure", "fmt": "{:.2f}",
+        "unit": {"zh": "|买笔数 - 卖笔数|（日均）", "en": "|buys - sells| per day"},
+    },
+    {
+        "stem": "full_closure",
+        "name": {"zh": "满闭环率", "en": "Full-closure Rate"},
+        "key": "full_closure_rate", "scale": 100.0, "vmax": 100.0, "fmt": "{:.1f}",
+        "unit": {"zh": "闭环率为 1 的有成交日占比 (%)",
+                 "en": "Share of traded days fully paired (%)"},
+    },
+    {
         "stem": "width_rel",
         "name": {"zh": "日均网格宽幅", "en": "Grid Half-width"},
         "key": "mean_width_rel", "scale": 100.0, "fmt": "{:.2f}",

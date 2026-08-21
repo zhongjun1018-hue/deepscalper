@@ -34,3 +34,6 @@ webviz/data/
 .vscode/
 .DS_Store
 Thumbs.db
+
+report/
+.claude/skills/

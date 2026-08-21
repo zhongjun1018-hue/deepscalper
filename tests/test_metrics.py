@@ -52,6 +52,9 @@ class SummarizeTest(unittest.TestCase):
         self.assertAlmostEqual(summary["mean_trades"], 4.0)
         self.assertAlmostEqual(summary["mean_buys"], 2.5)
         self.assertAlmostEqual(summary["mean_sells"], 1.5)
+        # 日终敞口与满闭环率按有成交日平均：两个有成交日中一日敞口 2、一日满闭环
+        self.assertAlmostEqual(summary["mean_abs_exposure"], 1.0)
+        self.assertAlmostEqual(summary["full_closure_rate"], 0.5)
         # 宽幅的矩只计有值的交易日
         self.assertAlmostEqual(summary["mean_width_rel"], 0.006)
 
@@ -61,12 +64,15 @@ class SummarizeTest(unittest.TestCase):
 
         self.assertTrue(np.isnan(summary["mean_closure_rate"]))
         self.assertTrue(np.isnan(summary["mean_trades"]))
+        self.assertTrue(np.isnan(summary["mean_abs_exposure"]))
+        self.assertTrue(np.isnan(summary["full_closure_rate"]))
 
     def test_field_contract(self):
         summary = summarize(self.records)
 
         for key in ("n_days", "mean_g", "std_g", "mean_closure_rate", "mean_trades",
-                    "mean_buys", "mean_sells", "mean_width_rel"):
+                    "mean_buys", "mean_sells", "mean_abs_exposure",
+                    "full_closure_rate", "mean_width_rel"):
             self.assertIn(key, summary)
 
     def test_empty_records(self):
