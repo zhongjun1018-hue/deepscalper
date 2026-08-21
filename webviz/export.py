@@ -2,7 +2,7 @@
 
 导出布局（index.html 通过 fetch 读取，需 `python -m http.server` 伺服）：
   webviz/data/forecast/<symbol>/<date>.json   逐日价格曲线、滑动窗口统计、常开与识别门控网格回放
-  webviz/data/control/<symbol>/<date>.json    贪心决策点（生效网格）、成交标记与单日摘要
+  webviz/data/control/<symbol>/<date>.json    贪心决策点（逐段生效网格）、成交标记与单日摘要
   webviz/data/index.json                        两侧可用的 (symbol, date) 目录与展示参数
 
 页面以 forecast 目录为主索引，同日的 control 数据充当单日对比栏的第三张卡片
@@ -14,8 +14,8 @@ strategy.engine.run_day(trace=True)（锚点门控 + 连续确认，只在净持
 网格回放只覆盖测试段（样本外），其余日期仅导出价格与窗口。
 
 control 数据源：control.trace.load_checkpoint 重建统一训练的网络、Config 与逐标的
-标准化统计量，greedy_policy 构建贪心策略，prepare_test_markets 构建测试段市场；逐测试日 control.trace.trace_day 贪心回放（定长决策），单日摘要与门控
-卡片同指标口径（g = 超额收益 × B / W_d，与 strategy.backtest 的 agent 模式一致）。
+标准化统计量，greedy_policy 构建贪心策略，prepare_test_markets 构建测试段市场；逐测试日 control.trace.trace_day 贪心回放（定长决策，区间内网格随成交逐段
+重建），单日摘要与门控卡片同指标口径（g = 超额收益 × B / W_d，与 strategy.backtest 的 agent 模式一致）。
 """
 
 from __future__ import annotations
@@ -305,9 +305,13 @@ def export_control_symbol(symbol: str, checkpoint: tuple, args) -> dict:
             "minute": int(table["minute"][d["t"]]),
             "width": float(d["width"]),
             "size": int(d["size"]),
-            "center": round(float(d["center"]), 4),
-            "upper": round(float(d["upper"]), 4) if d["upper"] is not None else None,
-            "lower": round(float(d["lower"]), 4) if d["lower"] is not None else None,
+            "grids": [{
+                "t": g["t"],
+                "x": round(float(table["x"][g["t"]]), 3),
+                "center": round(float(g["center"]), 4),
+                "upper": round(float(g["upper"]), 4),
+                "lower": round(float(g["lower"]), 4),
+            } for g in d["grids"]],
         } for d in result["decisions"]]
         fills = [{
             "t": f["t"],

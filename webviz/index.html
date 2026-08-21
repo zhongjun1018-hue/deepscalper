@@ -406,9 +406,8 @@ async function fetchJson(path) {
   return response.json();
 }
 
-function rlBandVisible(decision) {
-  return Number.isFinite(decision.upper) && Number.isFinite(decision.lower) &&
-         decision.upper - decision.center <= RL_BAND_CAP * decision.center;
+function rlBandVisible(grid) {
+  return grid.upper - grid.center <= RL_BAND_CAP * grid.center;
 }
 
 function buildScales(day, width) {
@@ -427,9 +426,11 @@ function buildScales(day, width) {
   }
   if (state.strategy === 'rl') {
     for (const decision of day.rl?.decisions || []) {
-      if (!rlBandVisible(decision)) continue;
-      low = Math.min(low, decision.lower);
-      high = Math.max(high, decision.upper);
+      for (const grid of decision.grids) {
+        if (!rlBandVisible(grid)) continue;
+        low = Math.min(low, grid.lower);
+        high = Math.max(high, grid.upper);
+      }
     }
   } else {
     for (const item of currentGrid(day)?.events || []) {
@@ -589,23 +590,27 @@ function drawRlBands(svg, day, scales, count) {
   const lastX = day.x[day.x.length - 1];
   const visibleEnd = count < decisions.length ? decisions[count].x : lastX;
   const layer = node('g', { 'stroke-linecap': 'round' }, svg);
+  // 每个决策区间内网格随成交逐段重建：段与段以成交时刻相接，末段延至下一决策点
   shown.forEach((item, position) => {
-    if (!rlBandVisible(item)) return;
-    const end = position + 1 < shown.length ? shown[position + 1].x : visibleEnd;
-    const left = scales.x(item.x);
-    const right = scales.x(Math.max(end, item.x));
-    if (right <= left) return;
-    node('rect', { x: left, y: scales.y(item.upper), width: right - left,
-                   height: Math.max(scales.y(item.lower) - scales.y(item.upper), 1),
-                   fill: 'var(--series-grid-dynamic)', 'fill-opacity': 0.12 }, layer);
-    node('line', { x1: left, x2: right, y1: scales.y(item.center), y2: scales.y(item.center),
-                   stroke: 'var(--series-grid-center)', 'stroke-width': 1.5,
-                   'stroke-dasharray': '4 4' }, layer);
-    for (const boundary of [item.upper, item.lower]) {
-      node('line', { x1: left, x2: right, y1: scales.y(boundary), y2: scales.y(boundary),
-                     stroke: 'var(--series-grid-dynamic)', 'stroke-width': 1,
-                     'stroke-opacity': 0.55 }, layer);
-    }
+    const intervalEnd = position + 1 < shown.length ? shown[position + 1].x : visibleEnd;
+    item.grids.forEach((grid, index) => {
+      if (!rlBandVisible(grid)) return;
+      const end = index + 1 < item.grids.length ? item.grids[index + 1].x : intervalEnd;
+      const left = scales.x(grid.x);
+      const right = scales.x(Math.max(end, grid.x));
+      if (right <= left) return;
+      node('rect', { x: left, y: scales.y(grid.upper), width: right - left,
+                     height: Math.max(scales.y(grid.lower) - scales.y(grid.upper), 1),
+                     fill: 'var(--series-grid-dynamic)', 'fill-opacity': 0.12 }, layer);
+      node('line', { x1: left, x2: right, y1: scales.y(grid.center), y2: scales.y(grid.center),
+                     stroke: 'var(--series-grid-center)', 'stroke-width': 1.5,
+                     'stroke-dasharray': '4 4' }, layer);
+      for (const boundary of [grid.upper, grid.lower]) {
+        node('line', { x1: left, x2: right, y1: scales.y(boundary), y2: scales.y(boundary),
+                       stroke: 'var(--series-grid-dynamic)', 'stroke-width': 1,
+                       'stroke-opacity': 0.55 }, layer);
+      }
+    });
   });
 }
 
@@ -616,7 +621,7 @@ function drawRlMarks(svg, day, scales, count) {
   decisions.slice(0, count).forEach(item => {
     if (item.width !== 0) return;
     const cx = scales.x(item.x);
-    const cy = scales.y(item.center);
+    const cy = scales.y(day.price[item.t]);
     const mark = node('rect', { x: cx - 4, y: cy - 4, width: 8, height: 8,
                                 fill: 'var(--gate-edge)', stroke: 'var(--card)',
                                 'stroke-width': 1.2,

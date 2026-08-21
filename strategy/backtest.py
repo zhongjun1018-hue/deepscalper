@@ -2,14 +2,13 @@
 
 四种模式共用同一指标口径（strategy/metrics.summarize）：以当日基准格距
 W_d = max(0.1·ATR3, ε·前收) 归一的费用后网格收益 g（docs/grid_profit.md §七），
-加日均闭环率与日均买卖笔数（各报逐日等权与按成交笔数加权两个口径，加权分母
-剔除零交易日）以及相对网格宽幅（生效半宽 / 当日开盘价）。前三种模式由
-strategy/engine.run_day 回放固定半宽 W_d 网格（每笔成交 1 手、省略 100 股因子；
-门控只在净持仓为 0 时按分钟锚点节奏读取当拍信号，状态切换经 confirm_n 连续确认），
-g = 费用后净利润 / W_d（费率见 strategy/costs.py）。agent 模式从 control/runs 的
-统一训练检查点重建智能体，在各标的测试日上按定长决策贪心回放 TradingEnv（与
-control 评估同一路径），以同一 W_d 归一其相对底仓的超额净利；检查点缺失时跳过
-该模式。
+加日均闭环率与日均买卖笔数（均为总和除以该指标非零日的日数）以及相对网格宽幅
+（生效半宽 / 当日开盘价）。前三种模式由 strategy/engine.run_day 回放固定半宽 W_d
+网格（每笔成交 1 手、省略 100 股因子；门控只在净持仓为 0 时按分钟锚点节奏读取
+当拍信号，状态切换经 confirm_n 连续确认），g = 费用后净利润 / W_d（费率见
+strategy/costs.py）。agent 模式从 control/runs 的统一训练检查点重建智能体，在各
+标的测试日上按定长决策贪心回放 TradingEnv（与 control 评估同一路径），以同一 W_d
+归一其相对底仓的超额净利；检查点缺失时跳过该模式。
 
 门控信号来自 forecast/regime：oracle 用事后模式标签（labels.pattern_labels），
 prediction 用识别器概率过验证段率配平的阈值 τ，逐分钟信号按锚点前向填充到 tick

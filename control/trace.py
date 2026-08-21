@@ -1,9 +1,9 @@
 """RL 检查点工具与决策轨迹回放：解析 / 加载统一训练检查点、构建贪心策略与测试段
 市场（webviz 与统一回测共用），并对单个交易日贪心回放记录网格与成交（webviz 用）。
 
-只记录环境真实提供的信息：决策点的生效网格按 env.step 的口径计算（决策点发生立即
-成交时中心已移至成交价，触发线按新中心重算），成交直接取自 env.fills——网格成交、
-决策点平仓与日终清仓都在其中，平仓与清仓按对手方一档价成交（control/env.py）。
+只记录环境真实提供的信息：网格按 env.step 的口径逐段重建（中心只随成交移动，每笔
+成交后按本区间的决策半宽重算上下轨，决策点立即成交亦然），成交直接取自 env.fills——
+网格成交、决策点平仓与日终清仓都在其中，平仓与清仓按对手方一档价成交（control/env.py）。
 """
 
 from __future__ import annotations
@@ -122,14 +122,16 @@ def prepare_test_markets(symbol: str, cfg: Config, stats: FeatureStats | None,
 
 
 def trace_day(market: DayMarket, policy) -> dict:
-    """对单个交易日回放 policy，记录每个决策点的生效网格与全部成交。
+    """对单个交易日回放 policy，记录每个决策区间的网格段与全部成交。
 
     policy(obs) → 动作档位 (半宽档, 数量档)，由调用方以 greedy_policy 构造。返回：
-      {"decisions": [{t, width, size, center, upper, lower}],  # 各决策点的生效网格
-       "fills": [{t, side, price, qty, kind}],                  # 全部成交（含平仓与清仓，kind 见 Fill）
+      {"decisions": [{t, width, size, grids: [{t, center, upper, lower}]}],
+       "fills": [{t, side, price, qty, kind}],   # 全部成交（含平仓与清仓，kind 见 Fill）
        "ret": 相对底仓的超额收益（与 control.train.replay_day 同口径）,
        "log": episode_log 摘要}
-    平仓档（width == 0）不建网格，upper / lower 记 None、size 记 0（与 env.step 一致）。
+    grids 为区间内依次生效的网格：首段起于决策点（发生立即成交时中心已移至成交价），
+    此后每笔网格成交把中心移到成交价并按同一决策半宽重算上下轨，各成一段。
+    平仓档（width == 0）不建网格，grids 为空、size 记 0（与 env.step 一致）。
     """
     env = TradingEnv(market, hindsight=False)
     obs = env.observation()
@@ -141,20 +143,23 @@ def trace_day(market: DayMarket, policy) -> dict:
         n_fills = len(env.fills)
         res = env.step(params)
 
+        grids = []
+        size = params.size
         if params.width > 0.0:
-            # 决策点发生立即成交时中心已移至成交价，环境按新中心重算触发线（env.step）
-            immediate = next((f for f in env.fills[n_fills:] if f.kind == "immediate"), None)
-            if immediate is not None:
-                center = immediate.price
             hw = half_width(params.width, market.atr, market.pre_close,
                             env.cfg.window.min_width_ratio)
-            upper, lower = boundaries(center, hw, env.cfg.tick_size)
-            size = params.size
+            centers = [(t, center)]
+            for f in env.fills[n_fills:]:
+                if f.kind == "immediate":
+                    centers[0] = (t, f.price)
+                elif f.kind == "grid":
+                    centers.append((f.tick, f.price))
+            for u, c in centers:
+                upper, lower = boundaries(c, hw, env.cfg.tick_size)
+                grids.append({"t": u, "center": c, "upper": upper, "lower": lower})
         else:
-            upper = lower = None
             size = 0                       # 平仓档不建网格，生效数量记 0
-        decisions.append({"t": t, "width": params.width, "size": size,
-                          "center": center, "upper": upper, "lower": lower})
+        decisions.append({"t": t, "width": params.width, "size": size, "grids": grids})
         if res.done:
             break
         obs = res.obs

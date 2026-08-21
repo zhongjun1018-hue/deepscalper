@@ -90,13 +90,32 @@ class TraceDayTest(unittest.TestCase):
         self.assertTrue(decisions)
         ticks = []
         for d in decisions:
-            self.assertEqual(set(d), {"t", "width", "size", "center", "upper", "lower"})
+            self.assertEqual(set(d), {"t", "width", "size", "grids"})
             self.assertEqual(d["width"], 0.1)   # 固定半宽档
             self.assertEqual(d["size"], 1)
-            self.assertGreater(d["upper"], d["center"])
-            self.assertGreater(d["center"], d["lower"])
+            self.assertTrue(d["grids"])
+            self.assertEqual(d["grids"][0]["t"], d["t"])   # 首段起于决策点
+            for g in d["grids"]:
+                self.assertEqual(set(g), {"t", "center", "upper", "lower"})
+                self.assertGreater(g["upper"], g["center"])
+                self.assertGreater(g["center"], g["lower"])
             ticks.append(d["t"])
         self.assertTrue(all(later > earlier for earlier, later in zip(ticks, ticks[1:])))
+
+    def test_grids_recenter_on_every_fill(self):
+        decisions, fills = self.result["decisions"], self.result["fills"]
+
+        # 区间内每笔网格成交各开一段，中心为成交价；半宽沿用本区间决策半宽
+        grid_fills = [f for f in fills if f["kind"] == "grid"]
+        self.assertTrue(grid_fills)
+        segments = {(g["t"], g["center"]) for d in decisions for g in d["grids"][1:]}
+        self.assertEqual(segments, {(f["t"], f["price"]) for f in grid_fills})
+        half = {round(g["upper"] - g["lower"], 6) for d in decisions for g in d["grids"]}
+        self.assertLessEqual(len(half), 2)   # 仅差在边界取整到最小变动价位
+        immediate = [f for f in fills if f["kind"] == "immediate"]
+        starts = {d["t"]: d["grids"][0]["center"] for d in decisions}
+        for f in immediate:   # 决策点立即成交：首段中心已移至成交价
+            self.assertEqual(starts[f["t"]], f["price"])
 
     def test_fill_fields_and_conservation(self):
         fills = self.result["fills"]
@@ -149,8 +168,7 @@ class TraceFlattenTest(unittest.TestCase):
         self.assertTrue(flatten_ticks)
         for d in decisions:
             if d["width"] == 0.0:   # 平仓档不建网格，生效数量记 0
-                self.assertIsNone(d["upper"])
-                self.assertIsNone(d["lower"])
+                self.assertEqual(d["grids"], [])
                 self.assertEqual(d["size"], 0)
         flatten = [f for f in fills if f["kind"] == "flatten"]
         self.assertTrue(flatten)   # 平仓按对手一档价记在决策点上

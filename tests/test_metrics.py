@@ -45,39 +45,28 @@ class SummarizeTest(unittest.TestCase):
         summary = summarize(self.records)
 
         self.assertEqual(summary["n_days"], 3)
-        # 等权口径的分母含零交易日
+        # g 的矩按有值日计（含零交易日）
         self.assertAlmostEqual(summary["mean_g"], 2.0 / 3.0)
-        self.assertAlmostEqual(summary["mean_trades"], 8.0 / 3.0)
-        self.assertAlmostEqual(summary["mean_buys"], 5.0 / 3.0)
-        self.assertAlmostEqual(summary["mean_closure_rate"], 0.5)
+        # 闭环率与笔数的分母只数该指标非零的日
+        self.assertAlmostEqual(summary["mean_closure_rate"], 0.75)
+        self.assertAlmostEqual(summary["mean_trades"], 4.0)
+        self.assertAlmostEqual(summary["mean_buys"], 2.5)
+        self.assertAlmostEqual(summary["mean_sells"], 1.5)
         # 宽幅的矩只计有值的交易日
         self.assertAlmostEqual(summary["mean_width_rel"], 0.006)
 
-    def test_trade_weighted_means_exclude_zero_trade_days(self):
-        summary = summarize(self.records)
-
-        # 加权闭环率为全期汇总买卖笔数的直接配对：2·min(5,3)/8
-        self.assertAlmostEqual(summary["weighted_closure_rate"], 0.75)
-        # 买卖与成交次数按当日笔数加权，零交易日权重为 0
-        self.assertAlmostEqual(summary["weighted_trades"], 4.0)
-        self.assertAlmostEqual(summary["weighted_buys"], 2.5)
-        self.assertAlmostEqual(summary["weighted_sells"], 1.5)
-
-    def test_all_zero_trade_days_yield_nan_weighted_metrics(self):
+    def test_all_zero_days_yield_nan_counts(self):
         summary = summarize([{"g": 0.0, "n_buys": 0, "n_sells": 0,
                               "closure_rate": 0.0, "width_rel": float("nan")}])
 
-        self.assertAlmostEqual(summary["mean_closure_rate"], 0.0)
-        self.assertTrue(np.isnan(summary["weighted_closure_rate"]))
-        self.assertTrue(np.isnan(summary["weighted_trades"]))
+        self.assertTrue(np.isnan(summary["mean_closure_rate"]))
+        self.assertTrue(np.isnan(summary["mean_trades"]))
 
     def test_field_contract(self):
         summary = summarize(self.records)
 
-        for key in ("n_days", "mean_g", "std_g",
-                    "mean_closure_rate", "mean_trades", "mean_buys", "mean_sells",
-                    "weighted_closure_rate", "weighted_trades", "weighted_buys",
-                    "weighted_sells", "mean_width_rel"):
+        for key in ("n_days", "mean_g", "std_g", "mean_closure_rate", "mean_trades",
+                    "mean_buys", "mean_sells", "mean_width_rel"):
             self.assertIn(key, summary)
 
     def test_empty_records(self):
@@ -86,7 +75,7 @@ class SummarizeTest(unittest.TestCase):
         self.assertEqual(summary["n_days"], 0)
         self.assertTrue(np.isnan(summary["mean_g"]))
         self.assertTrue(np.isnan(summary["mean_trades"]))
-        self.assertTrue(np.isnan(summary["weighted_closure_rate"]))
+        self.assertTrue(np.isnan(summary["mean_closure_rate"]))
 
 
 if __name__ == "__main__":

@@ -3,7 +3,7 @@
 `index.html` 按算法、标的和交易日展示两个算法的实时决策过程，页面为免框架单文件实现，通过 `fetch` 读取 `webviz/data/`：
 
 - **模式门控网格（forecast）**：逐日价格曲线、滑动窗口统计，以及各 scheme 的网格回放事件。行情模式识别控制策略启停，且只在净持仓为 0 时切换（engine 语义）。
-- **强化学习（control）**：从统一训练检查点回放贪心决策轨迹——逐日 mid 曲线、各决策点（固定每 10 分钟锚点）的生效网格（半宽档与上下轨）、成交标记与决策点平仓事件。
+- **强化学习（control）**：从统一训练检查点回放贪心决策轨迹——逐日 mid 曲线、各决策点（固定每 10 分钟锚点）的半宽档与区间内逐段生效的网格上下轨（中心随每笔成交移动）、成交标记与决策点平仓事件。
 
 两个视图都在图上以竖虚线标注当日预测 / 决策起点（回看窗满的首个分钟锚点）。
 
@@ -44,7 +44,7 @@ control 侧 `--checkpoint` 缺省时按 `control/runs/` 的统一训练结果命
 | mid 曲线 | 连续竞价快照的一档中间价（复用价格曲线绘制，`price` 字段即 mid） |
 | 市场构建 | `control.train.build_markets`（窗口特征 + LightGBM 预测，缺块补零）；标准化统计量为统一训练逐标的在训练段拟合，随检查点加载 |
 | 决策回放 | `control.trace.load_checkpoint` 重建网络、Config 与标准化统计量，`control.trace.trace_day` 贪心回放测试段交易日 |
-| 决策点 | `decisions`：固定每 10 分钟锚点 + 日终；`width` 为生效半宽档（$\times\operatorname{ATR}_3$，0 表示平仓回底仓、100 为关闭档），`center/upper/lower` 为生效网格中心与上下轨（平仓档为 null） |
+| 决策点 | `decisions`：固定每 10 分钟锚点 + 日终；`width` 为生效半宽档（$\times\operatorname{ATR}_3$，0 表示平仓回底仓、100 为关闭档）；`grids` 为区间内依次生效的网格段 `{t, x, center, upper, lower}`：首段起于决策点（立即成交时中心已移至成交价），此后每笔网格成交把中心移到成交价并按同一决策半宽重算上下轨（平仓档为空） |
 | 成交标记 | `fills`：`TradingEnv` 的全部成交，`kind` $\in\{\texttt{grid},\texttt{immediate},\texttt{flatten},\texttt{liquidate}\}$（区间末触发 / 决策点立即成交 / 决策点平仓 / 日终清仓，后两者按对手方一档价成交），`side` $\in\{\texttt{buy},\texttt{sell}\}$，`qty` 以手计 |
 | 平仓事件 | 决策点平仓（`width` 为 0）在图上以菱形标记；平仓成交与网格成交同样以圆点标记，`kind` 在悬浮提示中区分 |
 | 单日摘要 | `log` 为 `TradingEnv.episode_log`：日内成交笔数、闭环率、决策点数、平仓次数、换手与费用等；成交口径不含日终清仓（design 7.4）；`grid` 为与 forecast 网格方案同构的卡片摘要（$g=$ 超额收益 $\times B/W_d$、时间加权生效半宽、平仓/关闭档的停用时长） |
