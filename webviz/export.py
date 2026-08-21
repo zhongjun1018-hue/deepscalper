@@ -32,7 +32,7 @@ from forecast.regime.classify import day_prob
 from forecast.regime.config import RegimeConfig
 from forecast.regime.data import expand_minutes, load_bank
 from forecast.regime.train import ensure_classifier
-from strategy import engine, metrics
+from strategy import costs, engine, metrics
 from strategy.grid import half_width
 
 DISPLAY_PATH_NAMES = ["rv", "path_len", "range_rel", "resid_abs_mean", "resid_abs_q90",
@@ -181,6 +181,9 @@ def build_grid(table: dict, width: float, t0: int, hard_exclude,
         events.append(item)
     trades = result["buys"] + result["sells"]
     excluded = excluded_runs(hard_exclude, table, t0)
+    # 卡片指标与统一回测同口径（regime.data.replay_grid_day）：g = 费用后净利润 / W_d
+    g = costs.daily_net(costs.fills_from_events(result["events"]),
+                        float(table["mid"][-1])) / width
     return {
         "width": round(float(width), 4),
         "buys": int(result["buys"]),
@@ -188,8 +191,8 @@ def build_grid(table: dict, width: float, t0: int, hard_exclude,
         "trades": int(trades),
         "score": (round(metrics.closure_rate(result["buys"], result["sells"]), 6)
                   if trades else None),
-        "grid_profit": round(result["grid_profit"], 6),
-        "profit_per_trade": round(result["grid_profit"] / trades, 6) if trades else None,
+        "grid_profit": round(g, 6),
+        "profit_per_trade": round(g / trades, 6) if trades else None,
         "gated_minutes": int(round(sum(end - start for start, end in excluded))),
         "evaluated_minutes": int(round(float(table["x"][-1] - table["x"][t0]))),
         "excluded": excluded,
@@ -206,7 +209,8 @@ def export_forecast_symbol(symbol: str, args, cfg: RegimeConfig, classifier,
                            threshold: float, symbol_id: int) -> dict:
     """导出一个标的的 forecast 算法回放数据，返回 index.json 的符号条目。"""
     bank = load_bank(symbol, cfg)
-    days = {d.date: d for d in load_days(symbol, data_dir=args.data_dir)}
+    days = {d.date: d for d in load_days(symbol, data_dir=args.data_dir,
+                                         atr_days=cfg.window.atr_window)}
     tables = {date: day_table(days[date]) for date in bank.dates}
     del days
 
@@ -288,7 +292,8 @@ def export_control_symbol(symbol: str, checkpoint: tuple, args) -> dict:
 
     net, cfg, stats, device, path = checkpoint
     test_m = prepare_test_markets(symbol, cfg, stats, args.data_dir, args.cache_dir)
-    day_lookup = {d.date: d for d in load_symbol_days(symbol, data_dir=args.data_dir)}
+    day_lookup = {d.date: d for d in load_symbol_days(symbol, data_dir=args.data_dir,
+                                                      atr_days=cfg.window.atr_window)}
     tables = {m.date: day_table(day_lookup[m.date]) for m in test_m}
     del day_lookup
     policy = greedy_policy(net, device)
@@ -330,7 +335,9 @@ def export_control_symbol(symbol: str, checkpoint: tuple, args) -> dict:
             "decisions": decisions,
             "fills": fills,
             "grid": day_summary(result, market, cfg, table),
-            "log": result["log"],
+            # width_rel 在全天不可触发时为 NaN，逐键过 finite 保证 JSON 可被前端解析
+            "log": {key: finite(value, 6) if isinstance(value, float) else value
+                    for key, value in result["log"].items()},
         })
         exported.append(market.date)
     return symbol_entry(symbol, exported, exported,

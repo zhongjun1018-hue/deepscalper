@@ -173,22 +173,27 @@ def main():
     if args.start_minute is not None and args.start_minute < 0:
         parser.error("--start-minute 须非负")
     symbols = sorted(args.symbols or list_symbols(args.data_dir))
+    # 识别器与预测缓存身份取 data 目录全部标的（symbol_id 与训练映射一致，避免子集
+    # 回测覆写共享产物），--symbols 只选回测子集
+    model_symbols = sorted(list_symbols(args.data_dir))
     cfg = RegimeConfig(data_dir=args.data_dir, cache_dir=args.cache_dir,
-                       symbols=tuple(symbols))
+                       symbols=tuple(model_symbols))
     start_minute = (args.start_minute if args.start_minute is not None
                     else cfg.window.lookback_min - 1)
 
     # agent 状态依赖预测缓存；识别器缺失或过期时先重训
-    ensure_predictions(symbols, ForecastConfig(
-        data_dir=args.data_dir, cache_dir=args.cache_dir, symbols=tuple(symbols)))
-    classifier, threshold = ensure_classifier(symbols, cfg)
+    ensure_predictions(model_symbols, ForecastConfig(
+        data_dir=args.data_dir, cache_dir=args.cache_dir,
+        symbols=tuple(model_symbols)))
+    classifier, threshold = ensure_classifier(model_symbols, cfg)
     agent = load_agent(args)
 
     gated = {"total": 0, "oracle": 0, "prediction": 0}
     symbol_summaries, symbol_gated = {}, {}
-    for symbol_id, symbol in enumerate(symbols):
+    for symbol in symbols:
         bank = load_bank(symbol, cfg)
-        records, counts = run_engine_modes(bank, classifier, threshold, symbol_id,
+        records, counts = run_engine_modes(bank, classifier, threshold,
+                                           model_symbols.index(symbol),
                                            cfg, start_minute)
         if agent is not None:
             records["agent"] = run_agent_mode(symbol, agent, args)

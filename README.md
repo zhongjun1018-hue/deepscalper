@@ -42,7 +42,7 @@ uv sync                # torch(CUDA 12.8) / numpy / pandas / lightgbm / scikit-l
 
 ## 运行
 
-各入口（含「可视化」一节）的 `--symbols` 不指定时默认 `data/` 下全部标的。
+各训练 / 回测 / 导出入口（含「可视化」一节）的 `--symbols` 不指定时默认 `data/` 下全部标的；`control.summarize` 只读结果目录、冒烟测试用位置参数指定单标的。
 
 ```bash
 # 1. 统一缓存预建（幂等，跨标的并行构建 cache/<symbol>.npz，--workers 控制并行数与内存峰值；

@@ -293,12 +293,10 @@ class Fill:
 @dataclass
 class Interval:
     tau: int               # 区间时长（tick，诊断的时间加权用）
-    excess: float          # 区间内时间加权平均超额敞口（手，带符号）
     abs_excess: float      # 时间加权平均绝对超额敞口（手）
     max_abs_excess: float  # 区间内最大绝对超额敞口（手）
-    boundary_share: float  # |excess| 触及仓位带边界（≥ Q0）的时间占比
+    boundary_share: float  # 超额敞口触及仓位带边界（≥ Q0）的时间占比
     width: float           # 生效半宽档（× ATR3）
-    size: int              # 生效成交手数（平仓时记 0）
     inventory_load: float  # (时间加权平均 I/B)^2
 
 
@@ -309,7 +307,6 @@ class StepResult:
     train_reward: float      # 按 σ_d 归一、含 hindsight bonus 与存货惩罚的训练奖励
     done: bool
     minute: int              # 下一决策分钟
-    t: int                   # 下一决策点的 tick 索引
     priv_hist: np.ndarray    # 下一决策点的私有状态历史
 
 
@@ -553,7 +550,8 @@ class TradingEnv:
         b = self.base_value
         reward = ((equity_close - equity_open) - q0 * (p_close - p_open)) / b
         # 两个只用于训练的塑形项（6.2）：hindsight bonus 与存货惩罚的仓位取区间内
-        # 时间加权。训练奖励整体按当日 σ_d 归一，使各交易日尺度一致。
+        # 时间加权。主奖励与 hindsight 项按当日 σ_d 归一（使各交易日尺度一致），
+        # 再减无量纲的存货惩罚。
         train_reward = reward
         if self.hindsight:
             train_reward += (cfg.hindsight_weight
@@ -562,9 +560,9 @@ class TradingEnv:
         train_reward = train_reward / m.sigma_d - cfg.inventory_lambda * load * load * tau / m.n
 
         self.intervals.append(
-            Interval(tau=tau, excess=mean_excess, abs_excess=abs_time / tau,
+            Interval(tau=tau, abs_excess=abs_time / tau,
                      max_abs_excess=max_abs, boundary_share=boundary_time / tau,
-                     width=width, size=size, inventory_load=load * load)
+                     width=width, inventory_load=load * load)
         )
         self.n_steps += 1
         self.t = t_next
@@ -575,7 +573,6 @@ class TradingEnv:
             train_reward=float(train_reward),
             done=done,
             minute=minute_next,
-            t=t_next,
             priv_hist=self.priv_window(minute_next),
         )
 

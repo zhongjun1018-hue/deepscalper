@@ -95,17 +95,17 @@ class SweepTableTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             for seed, (center_sr, varied_sr) in enumerate(((0.2, 0.5), (0.4, 0.7))):
                 write_result(root, None, None, seed, center_sr)
-                write_result(root, "lr", 3e-4, seed, varied_sr)
+                write_result(root, "lr", 1e-4, seed, varied_sr)
 
             table = sweep_table(load_rows(root), ["lr", "batch_size"])
 
             lr = table[table["param"] == "lr"].set_index("value")
-            self.assertAlmostEqual(lr.loc["0.0001*", "val_SR"], 0.3)
-            self.assertAlmostEqual(lr.loc["0.0003", "val_SR"], 0.6)
-            self.assertEqual(lr.loc["0.0003", "n_runs"], 2)
+            self.assertAlmostEqual(lr.loc["0.0003*", "val_SR"], 0.3)
+            self.assertAlmostEqual(lr.loc["0.0001", "val_SR"], 0.6)
+            self.assertEqual(lr.loc["0.0001", "n_runs"], 2)
             # 未跑过的梯子只有中心点一行（默认档）
             batch = table[table["param"] == "batch_size"]
-            self.assertEqual(batch["value"].tolist(), ["64*"])
+            self.assertEqual(batch["value"].tolist(), ["128*"])
 
 
 if __name__ == "__main__":

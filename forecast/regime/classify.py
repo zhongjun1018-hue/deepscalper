@@ -15,9 +15,8 @@ import numpy as np
 
 from data_provider.windows import FEATURE_NAMES
 
+from forecast.model import DEFAULT_MODEL_KWARGS, SYMBOL_FEATURE
 from forecast.regime.data import SymbolBank
-
-SYMBOL_FEATURE = "symbol_id"
 
 
 class Classifier:
@@ -27,7 +26,12 @@ class Classifier:
         self.seed = seed
         self.data_hash = data_hash
         self.feature_names = list(FEATURE_NAMES) + [SYMBOL_FEATURE]
-        kwargs = dict(model_kwargs or {})
+        kwargs = dict(DEFAULT_MODEL_KWARGS)
+        kwargs.update(model_kwargs or {})
+        conflicts = {name: kwargs[name] for name in ("objective", "metric")
+                     if name in kwargs}
+        if conflicts:
+            raise ValueError(f"训练目标参数不允许覆盖: {conflicts}")
         self.early_stopping_rounds = kwargs.pop("early_stopping_rounds")
         self.params = {"n_jobs": -1, "verbose": -1, "objective": "binary",
                        "metric": "auc", "random_state": seed, **kwargs}

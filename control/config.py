@@ -57,8 +57,8 @@ class Config:
     macro_hidden: int = 128
     trunk_hidden: int = 256
 
-    # ---- 训练（池化日程：每 epoch 约 22 标的 × 80 日 × 24 决策 ≈ 4.4 万条转移、
-    # 约 0.7 万次更新；日程与该规模绑定，经验证曲线微调）----
+    # ---- 训练（池化日程：每 epoch 约 22 标的 × 80 日 × 21 决策 ≈ 3.7 万条转移、
+    # 约 0.6 万次更新；日程与该规模绑定，经验证曲线微调）----
     normalize: bool = True          # 逐标的基于训练段的 z-score 特征标准化
     norm_clip: float = 10.0         # 标准化后的截断阈值
     gamma: float = 0.995            # 每分钟折扣；TD 折扣恒为 gamma^decision_interval_min

@@ -35,7 +35,7 @@ control 侧 `--checkpoint` 缺省时按 `control/runs/` 的统一训练结果命
 | 网格回放 | `strategy.engine.run_day(trace=True)`：测试段（样本外）标签可判定的交易日，统一自可预测起点（回看窗满首分钟的锚点）起回放；对手方一档严格越界成交，成交价为触发边界，中心只随成交移动 |
 | 门控 | 逐分钟信号按锚点前向填充到 tick；引擎只在净持仓为 0 时读取当拍信号，空仓期间每分钟锚点复判一次，状态切换需连续 confirm_n=2 拍一致，敞口归零即刻重判并重置计数 |
 | 单日对比 | 全天开启（none）/ 识别概率过滤（prediction，$P>\tau$）两种网格方案，同日导出过 control 数据时追加第三张卡片「强化学习决策」（点击切换到贪心回放路径；卡片指标与网格方案同构，$g$ 与统一回测 agent 模式同口径） |
-| Score / 网格收益 | `strategy.metrics` 口径：$\mathrm{Score}=2\min(N_b,N_s)/N$；去量纲单日收益、收益/交易次数及当日平均网格半宽 |
+| Score / 网格收益 | `strategy.metrics` 口径：$\mathrm{Score}=2\min(N_b,N_s)/N$；网格收益为费用后去量纲单日收益 $g$（与统一回测同口径，`strategy.costs.daily_net` / $W_d$）、收益/交易次数及当日平均网格半宽 |
 
 ### control（`data/control/<symbol>/<date>.json`）
 

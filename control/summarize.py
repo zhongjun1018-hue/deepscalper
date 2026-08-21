@@ -35,7 +35,7 @@ def load_rows(runs_dir: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def test_summary(df: pd.DataFrame) -> pd.DataFrame:
+def overall_summary(df: pd.DataFrame) -> pd.DataFrame:
     """汇总已经锁定超参的测试集全体等权指标：多种子给出均值 ± 标准差。"""
     out = []
     for keys, g in df.groupby(["method", "w", "lam"], dropna=False):
@@ -109,7 +109,7 @@ def main() -> None:
 
     sel = select_hyperparams(df)
     selected = selected_test_rows(df, sel)
-    summary = test_summary(selected)
+    summary = overall_summary(selected)
     out_path = os.path.join(args.runs_dir, "summary.csv")
     summary.to_csv(out_path, index=False)
     print("测试集汇总（全体等权）：")

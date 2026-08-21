@@ -1,7 +1,7 @@
 """逐日 K 线与固定网格半宽：特征构建、tick ATR 与回测共用的宽度口径。
 
-默认网格间距为 0.1×ATR（atr_mult=0.1、ATR 取前 3 个完整交易日 TR 均值），
-是全项目特征标签与网格回测的默认口径。
+网格间距为 atr_mult×ATR（ATR 取前 atr_window 个完整交易日 TR 均值），参数
+默认值统一定义在缓存规格 WindowSpec（data_provider/windows.py），此处不设缺省。
 """
 
 import numpy as np
@@ -28,12 +28,8 @@ def true_range(bars: pd.DataFrame) -> pd.Series:
     ], axis=1).max(axis=1)
 
 
-def grid_width(
-    bars: pd.DataFrame,
-    atr_mult: float = 0.1,
-    atr_window: int = 3,
-    min_width_ratio: float = 1e-3,
-) -> pd.Series:
+def grid_width(bars: pd.DataFrame, atr_mult: float, atr_window: int,
+               min_width_ratio: float) -> pd.Series:
     """逐日固定半宽 W = max(min_width_ratio×前收, atr_mult×ATR)，按 MDDate 索引。
 
     ATR 为前 atr_window 个完整交易日 TR 的均值（shift(1)，无前视）；

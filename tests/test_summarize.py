@@ -3,8 +3,8 @@ import os
 import tempfile
 import unittest
 
-from control.summarize import (load_rows, select_hyperparams, selected_test_rows,
-                               symbol_summary, test_summary)
+from control.summarize import (load_rows, overall_summary, select_hyperparams,
+                               selected_test_rows, symbol_summary)
 
 
 def write_result(root, filename, **overrides):
@@ -78,7 +78,7 @@ class HyperparameterSelectionTest(unittest.TestCase):
         self.assertEqual(set(grid["w"]), {0.1})
         self.assertEqual(len(grid), 2)
         # 汇总表对多种子给出均值 ± 标准差；逐标的表覆盖全部标的与方法
-        summary = test_summary(selected)
+        summary = overall_summary(selected)
         self.assertIn("±", summary[summary["method"] == "GRID"]["TR"].iloc[0])
         per_symbol = symbol_summary(selected)
         self.assertEqual(set(per_symbol["symbol"]), {"A", "B"})
@@ -91,7 +91,7 @@ class HyperparameterSelectionTest(unittest.TestCase):
         self.assertTrue(selection.empty)
         selected = selected_test_rows(self.df, selection)
         self.assertEqual(set(selected["method"]), {"OPEN"})
-        test_summary(selected)   # 空选优表下汇总不崩
+        overall_summary(selected)   # 空选优表下汇总不崩
 
 
 if __name__ == "__main__":

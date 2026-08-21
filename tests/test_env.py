@@ -79,10 +79,10 @@ class CenterAndFlattenTest(unittest.TestCase):
         env = self.make_env()
         env.center = 9.5   # 人为偏移中心，验证无成交区间不沿用原中心
 
-        res = env.step(GridParams(width=100.0, size=1))   # 关闭档：区间必然无成交
+        env.step(GridParams(width=100.0, size=1))   # 关闭档：区间必然无成交
 
         self.assertFalse(env.fills)
-        self.assertAlmostEqual(env.center, float(self.market.mid[res.t]))
+        self.assertAlmostEqual(env.center, float(self.market.mid[env.t]))
 
     def test_flatten_gear_is_allowed_only_off_base_position(self):
         env = self.make_env()

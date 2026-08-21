@@ -32,5 +32,5 @@ def daily_net(fills: list[tuple[int, float]], close_mid: float) -> float:
     for side, price in fills:
         exposure += side
         cash -= side * price
-        cash -= price * fee_rate(side)
+        cash -= fee(side, price)
     return cash + exposure * close_mid
